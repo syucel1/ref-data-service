@@ -1,0 +1,23 @@
+// The wire contract: two .proto files and the Java classes protoc generates from them.
+description = 'Wire contract (protocol + entity schema) and generated protobuf classes'
+
+def protoSrc = file('src/main/proto')
+def protoOut = layout.buildDirectory.dir('generated/proto/java')
+
+tasks.register('generateProto', Exec) {
+    description = 'Generates Java classes from src/main/proto with tools/protoc (libprotoc 3.21.7)'
+    inputs.dir protoSrc
+    outputs.dir protoOut
+    doFirst { protoOut.get().asFile.mkdirs() }
+    executable "${rootDir}/tools/protoc"
+    args '--proto_path=' + protoSrc, '--java_out=' + protoOut.get().asFile,
+         'refdata/protocol/v1/protocol.proto', 'refdata/schema/v1/entities.proto'
+}
+sourceSets.main.java.srcDir protoOut
+compileJava.dependsOn generateProto
+tasks.withType(JavaCompile).configureEach { options.compilerArgs -= '-Xlint:all'; options.compilerArgs += '-Xlint:none' } // generated code
+
+dependencies {
+    api rootProject.ext.libs.protobuf
+    api project(':refdata-model')
+}

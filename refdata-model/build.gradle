@@ -1,0 +1,4 @@
+description = 'Immutable domain model, indexes, validation and the RefDataSource interface (no Hibernate, no Netty, no protobuf)'
+dependencies {
+    implementation rootProject.ext.libs.slf4j
+}

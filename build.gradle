@@ -1,0 +1,55 @@
+// Offline build: every dependency is a jar in ./lib (see lib/README.md for provenance).
+def lib = { String name -> files("${rootDir}/lib/${name}") }
+ext {
+    libs = [
+        protobuf : lib('protobuf-java-3.21.7-extracted.jar'),
+        slf4j    : lib('slf4j-api-2.0.17.jar'),
+        log4j    : files("${rootDir}/lib/log4j-api-2.25.4.jar", "${rootDir}/lib/log4j-core-2.25.4.jar", "${rootDir}/lib/log4j-slf4j2-impl-2.25.4.jar"),
+        netty    : fileTree(dir: "${rootDir}/lib", include: 'netty-*.jar'),
+        derby    : fileTree(dir: "${rootDir}/lib", include: 'derby*.jar'),
+        lz4      : lib('lz4-java-1.11.0.jar'),
+        zstd     : lib('zstd-jni-1.5.7-7.jar'),
+        junit    : files("${rootDir}/lib/junit-4.13.2.jar", "${rootDir}/lib/hamcrest-core-1.3.jar"),
+    ]
+}
+
+subprojects {
+    apply plugin: 'java-library'
+    group = 'com.example.refdata'
+    version = '0.1.0-SNAPSHOT'
+    java {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs += ['-Xlint:all', '-Xlint:-serial', '-Xlint:-processing']
+    }
+    dependencies {
+        testImplementation rootProject.ext.libs.junit
+        testRuntimeOnly rootProject.ext.libs.log4j
+    }
+    test {
+        useJUnit()
+        maxHeapSize = '2g'
+        testLogging {
+            events 'failed', 'skipped'
+            exceptionFormat 'full'
+            showStandardStreams = false
+        }
+        systemProperty 'log4j2.configurationFile', "${rootDir}/config/log4j2-test.xml"
+        // integration tests are tagged with the JUnit category below and run by 'gradle integrationTest'
+        useJUnit { excludeCategories 'com.example.refdata.testing.IntegrationTest' }
+    }
+    tasks.register('integrationTest', Test) {
+        description = 'Runs the slow, end-to-end tests (database + TCP).'
+        group = 'verification'
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        maxHeapSize = '3g'
+        useJUnit { includeCategories 'com.example.refdata.testing.IntegrationTest' }
+        testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full' }
+        systemProperty 'log4j2.configurationFile', "${rootDir}/config/log4j2-test.xml"
+        shouldRunAfter tasks.named('test')
+    }
+}

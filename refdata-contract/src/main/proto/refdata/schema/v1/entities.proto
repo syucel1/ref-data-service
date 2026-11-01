@@ -1,0 +1,158 @@
+// DRAFT FOR REVIEW - v0.2 - not yet used by any implementation.
+// Reference Data Service - ENTITY SCHEMA (what a snapshot contains).
+// Intended repository path: refdata-contract/src/main/proto/refdata/schema/v1/entities.proto
+//
+// Versioned by schema major (this package name) and schema minor (announced in HelloAck),
+// independently of the protocol (refdata.protocol.v1, file protocol.proto).
+// Additive changes (new optional fields, new enum values, new entity types) = schema minor.
+// Anything else = new package refdata.schema.v2, served side by side for a migration window.
+// Readers must tolerate unknown fields, unknown enum numbers and unknown entity types.
+
+syntax = "proto3";
+
+package refdata.schema.v1;
+
+option java_package = "com.example.refdata.schema.v1";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+// Entities. Dates are days since 1970-01-01 (int32); timestamps are milliseconds since
+// 1970-01-01T00:00Z (int64, UTC - the database columns are TIMESTAMPTZ). 'optional' = nullable column.
+// ---------------------------------------------------------------------------
+// Numbers used in SnapshotRequest/SnapshotChunk/EntityManifest.entity_type (protocol.proto).
+// Chunks are sent in this (dependency) order.
+enum EntityType {
+  ENTITY_TYPE_UNSPECIFIED            = 0;
+  ENTITY_TYPE_COUNTRY                = 1;
+  ENTITY_TYPE_CURRENCY               = 2;
+  ENTITY_TYPE_CLIENT                 = 3;
+  ENTITY_TYPE_ADDRESS                = 4;
+  ENTITY_TYPE_ACCOUNT                = 5;
+  ENTITY_TYPE_SETTLEMENT_INSTRUCTION = 6;
+}
+
+message Country {
+  string country_code  = 1;   // ISO 3166 alpha-2, primary key
+  string iso3          = 2;
+  uint32 numeric_code  = 3;
+  string name          = 4;
+  string region        = 5;
+}
+
+message Currency {
+  string currency_code = 1;   // ISO 4217, primary key
+  uint32 numeric_code  = 2;
+  string name          = 3;
+  uint32 minor_units   = 4;
+  bool   active        = 5;
+}
+
+enum ClientType {
+  CLIENT_TYPE_UNSPECIFIED = 0;
+  CLIENT_TYPE_CORPORATE   = 1;
+  CLIENT_TYPE_FUND        = 2;
+  CLIENT_TYPE_BANK        = 3;
+  CLIENT_TYPE_INDIVIDUAL  = 4;
+  CLIENT_TYPE_GOVERNMENT  = 5;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_ACTIVE      = 1;
+  STATUS_SUSPENDED   = 2;
+  STATUS_CLOSED      = 3;
+}
+
+message Client {
+  int64  client_id              = 1;
+  string client_ref             = 2;
+  optional string lei           = 3;
+  string legal_name             = 4;
+  string short_name             = 5;
+  ClientType client_type        = 6;
+  Status status                 = 7;
+  string incorporation_country  = 8;
+  optional int64 parent_client_id = 9;
+  uint32 risk_rating            = 10;
+  int32  onboarded_date         = 11;
+  uint32 row_version            = 12;
+  int64  updated_at             = 13;
+}
+
+enum AddressType {
+  ADDRESS_TYPE_UNSPECIFIED = 0;
+  ADDRESS_TYPE_REGISTERED  = 1;
+  ADDRESS_TYPE_MAILING     = 2;
+  ADDRESS_TYPE_BILLING     = 3;
+  ADDRESS_TYPE_OPERATIONAL = 4;
+}
+
+message Address {
+  int64  address_id             = 1;
+  int64  client_id              = 2;
+  AddressType address_type      = 3;
+  string line1                  = 4;
+  optional string line2         = 5;
+  optional string line3         = 6;
+  string city                   = 7;
+  optional string region        = 8;
+  string postal_code            = 9;
+  string country_code           = 10;
+  bool   is_primary             = 11;
+  int32  valid_from             = 12;
+  optional int32 valid_to       = 13;
+  uint32 row_version            = 14;
+  int64  updated_at             = 15;
+}
+
+enum AccountType {
+  ACCOUNT_TYPE_UNSPECIFIED = 0;
+  ACCOUNT_TYPE_CASH        = 1;
+  ACCOUNT_TYPE_CUSTODY     = 2;
+  ACCOUNT_TYPE_MARGIN      = 3;
+  ACCOUNT_TYPE_TRADING     = 4;
+}
+
+message Account {
+  int64  account_id             = 1;
+  string account_number         = 2;
+  int64  client_id              = 3;
+  AccountType account_type      = 4;
+  string base_currency          = 5;
+  string booking_country        = 6;
+  Status status                 = 7;
+  int32  opened_date            = 8;
+  optional int32 closed_date    = 9;
+  uint32 row_version            = 10;
+  int64  updated_at             = 11;
+}
+
+enum AssetClass {
+  ASSET_CLASS_UNSPECIFIED  = 0;
+  ASSET_CLASS_CASH         = 1;
+  ASSET_CLASS_EQUITY       = 2;
+  ASSET_CLASS_FIXED_INCOME = 3;
+}
+
+message SettlementInstruction {
+  int64  ssi_id                 = 1;
+  int64  account_id             = 2;
+  string currency_code          = 3;
+  AssetClass asset_class        = 4;
+  string beneficiary_bic        = 5;
+  string agent_bic              = 6;
+  string agent_account          = 7;
+  bool   is_default             = 8;
+  int32  effective_from         = 9;
+  optional int32 effective_to   = 10;
+  uint32 row_version            = 11;
+  int64  updated_at             = 12;
+}
+
+// One batch type per entity; SnapshotChunk.payload holds exactly one of these.
+message CountryBatch               { repeated Country items = 1; }
+message CurrencyBatch              { repeated Currency items = 1; }
+message ClientBatch                { repeated Client items = 1; }
+message AddressBatch               { repeated Address items = 1; }
+message AccountBatch               { repeated Account items = 1; }
+message SettlementInstructionBatch { repeated SettlementInstruction items = 1; }

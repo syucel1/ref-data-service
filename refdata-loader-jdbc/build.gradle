@@ -1,0 +1,7 @@
+description = 'RefDataSource implementation over plain JDBC (the place a Hibernate loader would go)'
+dependencies {
+    api project(':refdata-model')
+    implementation rootProject.ext.libs.slf4j
+    testImplementation project(':refdata-db')
+    testRuntimeOnly rootProject.ext.libs.derby
+}

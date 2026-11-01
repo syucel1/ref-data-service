@@ -1,0 +1,20 @@
+description = 'Database schema (Derby, standard SQL), embedded database helper and the reproducible test-data generator'
+dependencies {
+    api project(':refdata-model')
+    implementation rootProject.ext.libs.slf4j
+    implementation rootProject.ext.libs.derby
+    runtimeOnly rootProject.ext.libs.log4j
+    testRuntimeOnly rootProject.ext.libs.derby
+}
+
+// gradle :refdata-db:dataGen -Pargs="--db data/tiny --profile TINY [--clients N] [--seed S]"
+tasks.register('dataGen', JavaExec) {
+    description = 'Generates a Derby database: -Pargs="--db <dir> --profile <TINY|MEDIUM|LARGE|XLARGE> [--clients N] [--seed S]"'
+    group = 'application'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.example.refdata.db.DataGenMain'
+    workingDir = rootDir
+    maxHeapSize = '2g'
+    systemProperty 'log4j2.configurationFile', "${rootDir}/config/log4j2.xml"
+    if (project.hasProperty('args')) args project.property('args').split('\\s+')
+}

@@ -1,0 +1,199 @@
+// DRAFT FOR REVIEW - v0.2 - not yet used by any implementation.
+// Reference Data Service - PROTOCOL contract (framing + control messages).
+// Intended repository path: refdata-contract/src/main/proto/refdata/protocol/v1/protocol.proto
+//
+// Versioned by protocol_major (this package) - independently of the entity schema
+// (refdata.schema.vN, file entities.proto). This file does not import the entity schema:
+// chunk payloads are opaque bytes and entity types travel as plain numbers whose meaning is
+// defined by refdata.schema.vN.EntityType.
+//
+// Framing: every frame on the TCP connection is
+//   [ 4-byte unsigned length, big-endian ][ Envelope, exactly 'length' bytes ]
+// 'length' excludes the prefix; 0 or > the receiver's limit is a protocol violation.
+//
+// FROZEN ACROSS ALL PROTOCOL MAJORS (so that version negotiation always works):
+//   the framing above, Envelope field numbers 1, 2 and 8, fields 1-5 of Hello,
+//   1-2 of HelloAck and 1-8 of ErrorReply, and ErrorCode values 1, 2, 3, 4, 7 and 9
+//   (the codes that can be sent before or during the handshake).
+//
+// Compatibility rules (CI: buf lint + buf breaking with category WIRE):
+//  * never change a field's number or type, never reuse a number - use 'reserved'
+//  * add fields only; new fields must be safe to ignore by older readers
+//  * every enum value is prefixed with the enum name; value 0 is <NAME>_UNSPECIFIED
+//  * proto3 'optional' requires protoc / runtime 3.15 or later
+
+syntax = "proto3";
+
+package refdata.protocol.v1;
+
+option java_package = "com.example.refdata.protocol.v1";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+// Envelope - the only message type that appears directly in a frame
+// ---------------------------------------------------------------------------
+message Envelope {
+  oneof body {
+    Hello           hello            = 1;   // C->S, first frame on a connection
+    HelloAck        hello_ack        = 2;   // S->C
+    SnapshotRequest snapshot_request = 3;   // C->S
+    SnapshotBegin   snapshot_begin   = 4;   // S->C
+    SnapshotChunk   snapshot_chunk   = 5;   // S->C, many
+    SnapshotEnd     snapshot_end     = 6;   // S->C
+    Heartbeat       heartbeat        = 7;   // both directions
+    ErrorReply      error            = 8;   // both directions
+    GoAway          go_away          = 9;   // S->C, planned shutdown
+    SnapshotQueued  snapshot_queued  = 10;  // S->C, request waits for an admission slot
+  }
+  // Field numbers 11-99 are kept free (deliberately NOT declared 'reserved') for future
+  // control and live-update messages. A server that finds no known body (body not set)
+  // answers ERROR_CODE_UNSUPPORTED_MESSAGE and carries on; a client ignores it.
+}
+
+// ---------------------------------------------------------------------------
+// Handshake and version negotiation
+// ---------------------------------------------------------------------------
+message Hello {
+  uint32 protocol_major           = 1;   // must be >= 1; 0 (unset) is rejected
+  uint32 protocol_minor           = 2;   // informational; minor differences are compatible
+  repeated uint32 schema_majors   = 3;   // entity schema majors understood, e.g. [1] or [1, 2]
+  uint32 max_frame_bytes          = 4;   // largest frame the client accepts; 0 = not stated = 1 MiB
+  string client_name              = 5;   // application name, for logs, metrics, audit
+  string client_instance          = 6;   // host/pid or pod name
+  string library_version          = 7;   // e.g. "refdata-client-java 1.2.0"
+  repeated Codec accepted_codecs  = 8;   // in order of preference; NONE is always implied
+  bool   keep_alive               = 9;   // keep the connection after the snapshot (heartbeats)
+}
+
+message HelloAck {
+  uint32 protocol_major         = 1;
+  uint32 protocol_minor         = 2;
+  uint32 schema_major           = 3;   // chosen: highest common with Hello.schema_majors
+  uint32 schema_minor           = 4;   // server's minor for that major; clients just log it
+  Codec  codec                  = 5;   // chosen codec for chunk payloads
+  uint32 max_frame_bytes        = 6;   // largest frame this server will send (<= client's limit)
+  uint32 heartbeat_interval_ms  = 7;   // always set: server heartbeats while queued, both sides when keep_alive
+  string server_id              = 8;   // instance name
+  string server_version         = 9;
+  string session_id             = 10;
+  SnapshotInfo current_snapshot = 11;  // lets a client decide before requesting
+}
+
+enum Codec {
+  CODEC_UNSPECIFIED = 0;   // treated as NONE
+  CODEC_NONE        = 1;
+  CODEC_LZ4         = 2;   // LZ4 block format: fast, modest ratio
+  CODEC_ZSTD        = 3;   // better ratio, more CPU
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot request / stream
+// ---------------------------------------------------------------------------
+message SnapshotRequest {
+  uint64 request_id                 = 1;   // chosen by the client, >= 1; echoed in replies
+  repeated uint32 entity_types      = 2;   // refdata.schema.vN.EntityType numbers; empty = all.
+                                           // Types the server does not know are ignored (not an error).
+  bytes  if_snapshot_id             = 3;   // "send only if different": client already holds this id
+  bytes  resume_snapshot_id         = 4;   // non-empty = this is a resume of that snapshot...
+  uint32 resume_from_seq            = 5;   // ...starting at this chunk; must lie inside the requested
+                                           // ranges, and entity_types must equal the original request
+}
+
+message SnapshotInfo {
+  bytes  snapshot_id              = 1;   // 16 bytes, content-derived (DESIGN.md 9.8):
+                                         // same data + same build + same chunk settings => same id
+  uint64 data_version             = 2;   // release id from REFDATA_RELEASE; 0 = not available
+  uint32 schema_major             = 3;
+  uint32 schema_minor             = 4;
+  int64  built_at_epoch_ms        = 5;
+  string source                   = 6;   // database identifier (no credentials)
+  bytes  content_sha256           = 7;   // SHA-256 over the entity_sha256 values, in manifest order
+  repeated EntityManifest entities = 8;  // in stream (dependency) order
+  uint32 total_chunks             = 9;
+  uint64 total_records            = 10;
+  uint64 total_uncompressed_bytes = 11;
+}
+
+message EntityManifest {
+  uint32 entity_type           = 1;   // refdata.schema.vN.EntityType number
+  uint64 record_count          = 2;
+  uint32 first_seq             = 3;   // chunks of this type are first_seq .. first_seq + chunk_count - 1
+  uint32 chunk_count           = 4;
+  uint64 uncompressed_bytes    = 5;   // wire size; the client library converts this to a heap estimate
+  bytes  entity_sha256         = 6;   // SHA-256 over the uncompressed payloads of this type, in seq order
+}
+
+// Sent when a SnapshotRequest has to wait for an admission slot (DESIGN.md 9.6).
+// SnapshotBegin follows when the transfer starts; heartbeats are sent while waiting.
+message SnapshotQueued {
+  uint64 request_id            = 1;
+  uint32 queue_position        = 2;   // 1 = next
+  uint32 max_wait_ms           = 3;   // after this the request is answered with SERVER_BUSY
+}
+
+message SnapshotBegin {
+  uint64 request_id            = 1;
+  SnapshotInfo snapshot        = 2;   // sent again on every resume, so the client can confirm the id
+  bool   not_modified          = 3;   // true: if_snapshot_id matched; no chunks, SnapshotEnd follows
+  repeated uint32 entity_types = 4;   // what will actually be sent, after filtering
+  uint32 first_seq             = 5;   // first chunk this response will send (resume point, or start)
+}
+
+// Identical bytes for every session (pre-encoded once), so it carries no session fields.
+message SnapshotChunk {
+  uint32 seq                   = 1;   // global position in the full snapshot, from 0
+  uint32 entity_type           = 2;   // refdata.schema.vN.EntityType number
+  uint32 record_count          = 3;
+  Codec  codec                 = 4;
+  uint32 uncompressed_size     = 5;
+  uint32 crc32                 = 6;   // CRC-32 (IEEE, as in zlib) over 'payload' exactly as sent
+  bytes  payload               = 7;   // (compressed) serialized <Entity>Batch from refdata.schema.vN
+}
+
+message SnapshotEnd {
+  uint64 request_id            = 1;
+  uint32 chunks_sent           = 2;   // totals for the requested entity types over the whole transfer,
+  uint64 records_sent          = 3;   // including chunks sent on earlier connections before a resume
+  bytes  content_sha256        = 4;   // whole-snapshot hash; verify it only when no filter was applied
+}
+
+message Heartbeat {
+  int64 sent_at_epoch_ms       = 1;
+}
+
+message GoAway {
+  ErrorCode reason             = 1;
+  string    message            = 2;
+  uint32    reconnect_after_ms = 3;
+}
+
+// Named ErrorReply (not Error) to avoid clashing with java.lang.Error in generated Java code.
+message ErrorReply {
+  uint64    request_id               = 1;   // 0 when not tied to a request
+  ErrorCode code                     = 2;
+  string    message                  = 3;   // human readable, never parsed
+  bool      fatal                    = 4;   // true: sender closes the connection after this frame
+  uint32    retry_after_ms           = 5;   // hint for SERVER_BUSY
+  uint32    supported_protocol_min   = 6;
+  uint32    supported_protocol_max   = 7;
+  repeated uint32 supported_schema_majors = 8;
+  uint32    seq                      = 9;   // chunk concerned, for INTEGRITY_FAILURE reports
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED                  = 0;
+  ERROR_CODE_PROTOCOL_VIOLATION           = 1;    // bad length, unparsable envelope, wrong message order
+  ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION = 2;
+  ERROR_CODE_UNSUPPORTED_SCHEMA_VERSION   = 3;
+  ERROR_CODE_HANDSHAKE_TIMEOUT            = 4;
+  ERROR_CODE_INVALID_REQUEST              = 5;    // e.g. bad resume point, second request while streaming
+  ERROR_CODE_UNSUPPORTED_MESSAGE          = 6;    // envelope body not understood (newer peer); non-fatal
+  ERROR_CODE_SERVER_BUSY                  = 7;    // connection limit, or admission wait exceeded
+  ERROR_CODE_SNAPSHOT_NOT_AVAILABLE       = 8;    // resume_snapshot_id not served by this instance
+  ERROR_CODE_FRAME_TOO_LARGE              = 9;
+  ERROR_CODE_SLOW_CONSUMER                = 10;   // best effort; usually the connection is just closed
+  ERROR_CODE_SERVER_SHUTTING_DOWN         = 11;
+  ERROR_CODE_INTERNAL_ERROR               = 12;
+  ERROR_CODE_IDLE_TIMEOUT                 = 13;   // no request after the handshake within the idle limit
+  ERROR_CODE_INTEGRITY_FAILURE            = 14;   // C->S report: chunk 'seq' failed its CRC or count check
+}

@@ -1,0 +1,26 @@
+description = 'The reference data service: validation, snapshot encoding, Netty TCP publication, health endpoint, main class'
+apply plugin: 'application'
+
+dependencies {
+    api project(':refdata-model')
+    api project(':refdata-contract')
+    implementation project(':refdata-loader-jdbc')
+    implementation rootProject.ext.libs.slf4j
+    implementation rootProject.ext.libs.netty
+    implementation rootProject.ext.libs.lz4
+    implementation rootProject.ext.libs.zstd
+    runtimeOnly rootProject.ext.libs.log4j
+    runtimeOnly rootProject.ext.libs.derby
+    testImplementation project(':refdata-db')
+}
+
+// gradle :refdata-server:run --args="config/refdata-server.properties"   (-Drds.* given to gradle are passed through)
+application {
+    mainClass = 'com.example.refdata.server.RefDataServerMain'
+    applicationDefaultJvmArgs = ["-Dlog4j2.configurationFile=${rootDir}/config/log4j2.xml", '-XX:+ExitOnOutOfMemoryError']
+}
+
+tasks.named('run') {
+    workingDir = rootDir
+    systemProperties System.getProperties().findAll { k, v -> k.toString().startsWith('rds.') }
+}

@@ -1,0 +1,33 @@
+sequenceDiagram
+    autonumber
+    participant C as Consumer (client library)
+    participant S as Reference Data Service
+    Note over S: Startup: load DB (one consistent snapshot), validate, index,<br/>pre-encode snapshot, close DB pool, THEN open TCP port
+    C->>S: TCP connect (host list, configurable port)
+    C->>S: Hello {protocol 1.0, schema majors [1], max frame, codecs, client name, keep_alive}
+    alt versions compatible
+        S-->>C: HelloAck {protocol 1.0, schema 1.3, codec NONE, max frame, session id, SnapshotInfo}
+    else no common protocol or schema major
+        S-->>C: ErrorReply {UNSUPPORTED_PROTOCOL_VERSION or UNSUPPORTED_SCHEMA_VERSION, supported versions, fatal}, close
+    end
+    C->>S: SnapshotRequest {request id, entity types (empty = all), if_snapshot_id?, resume_snapshot_id + resume_from_seq?}
+    alt if_snapshot_id equals the current snapshot
+        S-->>C: SnapshotBegin {not_modified = true}
+        S-->>C: SnapshotEnd {0 chunks}
+    else transfer
+        opt all transfer slots busy (admission control)
+            S-->>C: SnapshotQueued {position, max wait} (heartbeats while waiting, SERVER_BUSY if the wait runs out)
+        end
+        S-->>C: SnapshotBegin {SnapshotInfo: id, data version, manifest per entity type, first seq}
+        loop entity types in dependency order (COUNTRY, CURRENCY, CLIENT, ADDRESS, ACCOUNT, SSI)
+            S-->>C: SnapshotChunk {seq, entity type, record count, codec, CRC-32, payload}
+            Note right of C: check seq, CRC, record count, decode straight<br/>into lean model objects (staging, not visible),<br/>per-entity SHA-256 when a type completes
+        end
+        S-->>C: SnapshotEnd {chunks sent, records sent, content SHA-256}
+        Note right of C: check totals (+ whole hash if unfiltered), build indexes,<br/>resolve references, publish with one atomic swap
+    end
+    opt keep_alive (connection kept for future live updates)
+        C->>S: Heartbeat
+        S-->>C: Heartbeat
+    end
+    S-->>C: GoAway {SERVER_SHUTTING_DOWN} (planned shutdown, resume elsewhere if mid-transfer)

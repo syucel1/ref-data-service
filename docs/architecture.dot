@@ -1,0 +1,82 @@
+digraph RDS {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=12, nodesep=0.35, ranksep=0.55, compound=true, newrank=true,
+         label="Reference Data Service - component architecture (v0.2, for review)", labelloc=t, fontsize=16, pad=0.3];
+  node  [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=10, fillcolor="#ffffff", color="#555555", margin="0.12,0.06"];
+  edge  [fontname="DejaVu Sans", fontsize=9, color="#444444"];
+
+  subgraph cluster_src {
+    label="Source of truth (outside this service)"; style="rounded,dashed"; color="#888888"; fontsize=11;
+    admin [label="Admin application\n(creates clients, addresses,\naccounts, SSIs ...; bumps\nREFDATA_RELEASE when published)", fillcolor="#eeeeee"];
+    db    [label="Relational database\n(PostgreSQL)\n\nCOUNTRY  CURRENCY\nCLIENT  ADDRESS\nACCOUNT  SETTLEMENT_INSTRUCTION\n+ REFDATA_RELEASE (version)", shape=cylinder, fillcolor="#fff2cc"];
+    admin -> db [label="writes\n(read/write user)"]; {rank=same; admin; db;}
+  }
+
+  subgraph cluster_svc {
+    label="Reference Data Service  (one JVM, Java 21+; run 2+ identical instances for availability)"; style="rounded"; color="#1f4e79"; fontsize=12; penwidth=1.6;
+
+    cfg [label="Configuration\n(port, DB, chunk size, limits,\ntimeouts; read by every component)", fillcolor="#f2f2f2"];
+    ops [label="Health / readiness + metrics\nHTTP port (default 7401),\nMicrometer, JMX, startup report", fillcolor="#f2f2f2"];
+
+    subgraph cluster_load {
+      label="Load stage - ONLY place Hibernate exists"; style="rounded,filled"; fillcolor="#fdebd0"; color="#c55a11"; fontsize=10;
+      loader [label="Loader\nHibernate ORM, StatelessSession,\nread-only, forward-only scroll,\nORDER BY primary key"];
+      mapper [label="Entity -> Model mapper\n(Hibernate entities never\nleave this stage)"];
+      loader -> mapper; {rank=same; loader; mapper;}
+    }
+
+    subgraph cluster_model {
+      label="Hibernate-free core"; style="rounded,filled"; fillcolor="#deebf7"; color="#2e75b6"; fontsize=10;
+      validator [label="Validator\nrow rules, referential integrity,\nhierarchy cycles, date overlaps,\nsanity row counts"];
+      store [label="Immutable object model\n+ index builder\n(primary-key maps, unique keys,\nchildren, effective-dated lists)", fillcolor="#ffffff", penwidth=1.5];
+      encoder [label="Snapshot encoder\nProtocol Buffers batches,\nchunking, CRC-32,\noptional compression,\nSHA-256 per entity + total"];
+      snap [label="Snapshot store\npre-encoded read-only frames\n+ manifest + version info\n(encoded once, shared by all sessions)", fillcolor="#ffffff", penwidth=1.5];
+      validator -> store -> encoder -> snap; {rank=same; validator; store; encoder; snap;}
+    }
+
+    subgraph cluster_net {
+      label="TCP publication (Netty)"; style="rounded,filled"; fillcolor="#e2f0d9"; color="#548235"; fontsize=10;
+      acceptor [label="Acceptor\nconfigurable port,\nconnection limits"];
+      codec [label="Frame codec\n4-byte length prefix +\nprotobuf Envelope,\nmax frame size"];
+      session [label="Session handler\nhandshake / version negotiation,\nadmission queue, request checks,\nerrors, heartbeats, timeouts"];
+      streamer [label="Snapshot streamer\nsends frames in order,\nrespects back-pressure,\nresume from sequence"];
+      acceptor -> codec -> session -> streamer; {rank=same; acceptor; codec; session; streamer;}
+    }
+
+    mapper -> validator [label="model objects"];
+    snap -> streamer [label="shared frame buffers\n(no per-client encoding)"];
+    snap -> session [style=dotted, arrowhead=none, constraint=false];
+  }
+
+  db -> loader [label="JDBC, read-only user,\none consistent DB snapshot;\nstartup only, pool closed after", penwidth=1.4];
+
+  proto [label="Contract: protocol.proto + entities.proto\n+ one-page framing spec\n(language-neutral, versioned separately,\nbreaking-change checked in CI)", shape=note, fillcolor="#fff2cc"];
+
+  subgraph cluster_java {
+    label="Java consumer application (one JVM)"; style="rounded"; color="#7030a0"; fontsize=11; penwidth=1.4;
+    subgraph cluster_lib {
+      label="Reference Data client library (Java reference implementation)"; style="rounded,filled"; fillcolor="#ede1f5"; color="#7030a0"; fontsize=10;
+      conn [label="Connector\nhost list, retry/backoff,\nfail-over"];
+      fdec [label="Frame decoder\n+ handshake"];
+      asm  [label="Snapshot assembler\nseq / CRC / count / hash checks,\ndecodes each chunk straight\ninto lean model objects (staging)"];
+      lcache [label="Local in-memory cache\n+ indexes\n(published by one atomic swap,\nnever partially visible)", fillcolor="#ffffff", penwidth=1.5];
+      api  [label="Lookup API\nread-only, lock-free,\nno network, no allocation\non the lookup path"];
+      conn -> fdec -> asm -> lcache -> api; {rank=same; conn; fdec; asm; lcache; api;}
+    }
+    biz [label="Business logic\n(hot path)", fillcolor="#f2f2f2"];
+    api -> biz [dir=back, label="in-process\ncalls (ns)"];
+  }
+
+  subgraph cluster_other {
+    label="Any other consumer (C++, Python, Go, .NET ...)"; style="rounded,dashed"; color="#7030a0"; fontsize=11;
+    other [label="Generated protobuf classes\n+ ~100 lines of framing code\n+ own local cache"];
+  }
+
+  streamer -> conn   [label="TCP: snapshot frames", penwidth=1.6, color="#548235"];
+  streamer -> other  [label="TCP: same frames", penwidth=1.6, color="#548235"];
+  proto -> encoder [style=dashed, arrowhead=none, color="#b8860b"];
+  proto -> fdec    [style=dashed, arrowhead=none, color="#b8860b"];
+  proto -> codec   [style=dashed, arrowhead=none, color="#b8860b", constraint=false];
+  proto -> other   [style=dashed, arrowhead=none, color="#b8860b"];
+  cfg -> loader [style=dotted, arrowhead=none];
+  ops -> session [style=dotted, arrowhead=none];
+}

@@ -1,0 +1,14 @@
+description = 'End-to-end tests: database -> server -> client, fault injection, performance smoke'
+dependencies {
+    testImplementation project(':refdata-model')
+    testImplementation project(':refdata-contract')
+    testImplementation project(':refdata-db')
+    testImplementation project(':refdata-loader-jdbc')
+    testImplementation project(':refdata-server')
+    testImplementation project(':refdata-client')
+    testImplementation rootProject.ext.libs.slf4j
+    testImplementation rootProject.ext.libs.netty
+    testRuntimeOnly rootProject.ext.libs.derby
+    testRuntimeOnly rootProject.ext.libs.lz4
+    testRuntimeOnly rootProject.ext.libs.zstd
+}

@@ -1,0 +1,94 @@
+digraph ER {
+graph [rankdir=LR, fontname="DejaVu Sans", label="Six representative tables, v0.2 (rows = proposed 'large' profile; PK = primary key, UK = unique, FK = foreign key)", labelloc=t, fontsize=14, nodesep=0.4, ranksep=1.0, pad=0.3];
+node [shape=plaintext, fontname="DejaVu Sans", fontsize=10];
+edge [fontname="DejaVu Sans", fontsize=9, color="#555555", arrowhead=crow, arrowtail=tee, dir=both];
+country [label=<<table border="0" cellborder="1" cellspacing="0" cellpadding="3">
+<tr><td bgcolor="#1f4e79" align="left"><font color="white"><b>COUNTRY</b></font></td><td bgcolor="#1f4e79" align="right"><font color="white">~250</font></td></tr>
+<tr><td align="left" port="country_code">country_code PK</td><td align="left" port="country_code_e"><font color="#555555">CHAR(2) ISO 3166</font></td></tr>
+<tr><td align="left" port="iso3">iso3 UK</td><td align="left" port="iso3_e"><font color="#555555">CHAR(3)</font></td></tr>
+<tr><td align="left" port="numeric_code">numeric_code UK</td><td align="left" port="numeric_code_e"><font color="#555555">SMALLINT</font></td></tr>
+<tr><td align="left" port="name">name</td><td align="left" port="name_e"><font color="#555555">VARCHAR(100)</font></td></tr>
+<tr><td align="left" port="region">region</td><td align="left" port="region_e"><font color="#555555">VARCHAR(30)</font></td></tr>
+</table>>];
+currency [label=<<table border="0" cellborder="1" cellspacing="0" cellpadding="3">
+<tr><td bgcolor="#1f4e79" align="left"><font color="white"><b>CURRENCY</b></font></td><td bgcolor="#1f4e79" align="right"><font color="white">~180</font></td></tr>
+<tr><td align="left" port="currency_code">currency_code PK</td><td align="left" port="currency_code_e"><font color="#555555">CHAR(3) ISO 4217</font></td></tr>
+<tr><td align="left" port="numeric_code">numeric_code UK</td><td align="left" port="numeric_code_e"><font color="#555555">SMALLINT</font></td></tr>
+<tr><td align="left" port="name">name</td><td align="left" port="name_e"><font color="#555555">VARCHAR(60)</font></td></tr>
+<tr><td align="left" port="minor_units">minor_units</td><td align="left" port="minor_units_e"><font color="#555555">SMALLINT</font></td></tr>
+<tr><td align="left" port="active">active</td><td align="left" port="active_e"><font color="#555555">BOOLEAN</font></td></tr>
+</table>>];
+client [label=<<table border="0" cellborder="1" cellspacing="0" cellpadding="3">
+<tr><td bgcolor="#1f4e79" align="left"><font color="white"><b>CLIENT</b></font></td><td bgcolor="#1f4e79" align="right"><font color="white">1,000,000</font></td></tr>
+<tr><td align="left" port="client_id">client_id PK</td><td align="left" port="client_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="client_ref">client_ref UK</td><td align="left" port="client_ref_e"><font color="#555555">VARCHAR(20)</font></td></tr>
+<tr><td align="left" port="lei">lei UK (nullable)</td><td align="left" port="lei_e"><font color="#555555">CHAR(20)</font></td></tr>
+<tr><td align="left" port="legal_name">legal_name</td><td align="left" port="legal_name_e"><font color="#555555">VARCHAR(200)</font></td></tr>
+<tr><td align="left" port="short_name">short_name</td><td align="left" port="short_name_e"><font color="#555555">VARCHAR(50)</font></td></tr>
+<tr><td align="left" port="client_type">client_type</td><td align="left" port="client_type_e"><font color="#555555">VARCHAR(20) enum</font></td></tr>
+<tr><td align="left" port="status">status</td><td align="left" port="status_e"><font color="#555555">VARCHAR(12) enum</font></td></tr>
+<tr><td align="left" port="incorporation_country">incorporation_country FK</td><td align="left" port="incorporation_country_e"><font color="#555555">CHAR(2)</font></td></tr>
+<tr><td align="left" port="parent_client_id">parent_client_id FK (nullable)</td><td align="left" port="parent_client_id_e"><font color="#555555">BIGINT (self)</font></td></tr>
+<tr><td align="left" port="risk_rating">risk_rating</td><td align="left" port="risk_rating_e"><font color="#555555">SMALLINT</font></td></tr>
+<tr><td align="left" port="onboarded_date">onboarded_date</td><td align="left" port="onboarded_date_e"><font color="#555555">DATE</font></td></tr>
+<tr><td align="left" port="row_version">row_version</td><td align="left" port="row_version_e"><font color="#555555">INT</font></td></tr>
+<tr><td align="left" port="updated_at">updated_at</td><td align="left" port="updated_at_e"><font color="#555555">TIMESTAMPTZ</font></td></tr>
+</table>>];
+address [label=<<table border="0" cellborder="1" cellspacing="0" cellpadding="3">
+<tr><td bgcolor="#1f4e79" align="left"><font color="white"><b>ADDRESS</b></font></td><td bgcolor="#1f4e79" align="right"><font color="white">2,500,000</font></td></tr>
+<tr><td align="left" port="address_id">address_id PK</td><td align="left" port="address_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="client_id">client_id FK</td><td align="left" port="client_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="address_type">address_type</td><td align="left" port="address_type_e"><font color="#555555">VARCHAR(12) enum</font></td></tr>
+<tr><td align="left" port="line1">line1</td><td align="left" port="line1_e"><font color="#555555">VARCHAR(100)</font></td></tr>
+<tr><td align="left" port="line2">line2, line3 (nullable)</td><td align="left" port="line2_e"><font color="#555555">VARCHAR(100)</font></td></tr>
+<tr><td align="left" port="city">city</td><td align="left" port="city_e"><font color="#555555">VARCHAR(60)</font></td></tr>
+<tr><td align="left" port="region">region (nullable)</td><td align="left" port="region_e"><font color="#555555">VARCHAR(60)</font></td></tr>
+<tr><td align="left" port="postal_code">postal_code</td><td align="left" port="postal_code_e"><font color="#555555">VARCHAR(16)</font></td></tr>
+<tr><td align="left" port="country_code">country_code FK</td><td align="left" port="country_code_e"><font color="#555555">CHAR(2)</font></td></tr>
+<tr><td align="left" port="is_primary">is_primary</td><td align="left" port="is_primary_e"><font color="#555555">BOOLEAN</font></td></tr>
+<tr><td align="left" port="valid_from">valid_from / valid_to</td><td align="left" port="valid_from_e"><font color="#555555">DATE / DATE null</font></td></tr>
+<tr><td align="left" port="row_version">row_version</td><td align="left" port="row_version_e"><font color="#555555">INT</font></td></tr>
+<tr><td align="left" port="updated_at">updated_at</td><td align="left" port="updated_at_e"><font color="#555555">TIMESTAMPTZ</font></td></tr>
+</table>>];
+account [label=<<table border="0" cellborder="1" cellspacing="0" cellpadding="3">
+<tr><td bgcolor="#1f4e79" align="left"><font color="white"><b>ACCOUNT</b></font></td><td bgcolor="#1f4e79" align="right"><font color="white">3,000,000</font></td></tr>
+<tr><td align="left" port="account_id">account_id PK</td><td align="left" port="account_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="account_number">account_number UK</td><td align="left" port="account_number_e"><font color="#555555">VARCHAR(34)</font></td></tr>
+<tr><td align="left" port="client_id">client_id FK</td><td align="left" port="client_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="account_type">account_type</td><td align="left" port="account_type_e"><font color="#555555">VARCHAR(12) enum</font></td></tr>
+<tr><td align="left" port="base_currency">base_currency FK</td><td align="left" port="base_currency_e"><font color="#555555">CHAR(3)</font></td></tr>
+<tr><td align="left" port="booking_country">booking_country FK</td><td align="left" port="booking_country_e"><font color="#555555">CHAR(2)</font></td></tr>
+<tr><td align="left" port="status">status</td><td align="left" port="status_e"><font color="#555555">VARCHAR(12) enum</font></td></tr>
+<tr><td align="left" port="opened_date">opened_date</td><td align="left" port="opened_date_e"><font color="#555555">DATE</font></td></tr>
+<tr><td align="left" port="closed_date">closed_date (nullable)</td><td align="left" port="closed_date_e"><font color="#555555">DATE</font></td></tr>
+<tr><td align="left" port="row_version">row_version</td><td align="left" port="row_version_e"><font color="#555555">INT</font></td></tr>
+<tr><td align="left" port="updated_at">updated_at</td><td align="left" port="updated_at_e"><font color="#555555">TIMESTAMPTZ</font></td></tr>
+</table>>];
+settlement_instruction [label=<<table border="0" cellborder="1" cellspacing="0" cellpadding="3">
+<tr><td bgcolor="#1f4e79" align="left"><font color="white"><b>SETTLEMENT_INSTRUCTION</b></font></td><td bgcolor="#1f4e79" align="right"><font color="white">4,500,000</font></td></tr>
+<tr><td align="left" port="ssi_id">ssi_id PK</td><td align="left" port="ssi_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="account_id">account_id FK</td><td align="left" port="account_id_e"><font color="#555555">BIGINT</font></td></tr>
+<tr><td align="left" port="currency_code">currency_code FK</td><td align="left" port="currency_code_e"><font color="#555555">CHAR(3)</font></td></tr>
+<tr><td align="left" port="asset_class">asset_class</td><td align="left" port="asset_class_e"><font color="#555555">VARCHAR(16) enum</font></td></tr>
+<tr><td align="left" port="beneficiary_bic">beneficiary_bic</td><td align="left" port="beneficiary_bic_e"><font color="#555555">CHAR(11)</font></td></tr>
+<tr><td align="left" port="agent_bic">agent_bic</td><td align="left" port="agent_bic_e"><font color="#555555">CHAR(11)</font></td></tr>
+<tr><td align="left" port="agent_account">agent_account</td><td align="left" port="agent_account_e"><font color="#555555">VARCHAR(34)</font></td></tr>
+<tr><td align="left" port="is_default">is_default</td><td align="left" port="is_default_e"><font color="#555555">BOOLEAN</font></td></tr>
+<tr><td align="left" port="effective_from">effective_from</td><td align="left" port="effective_from_e"><font color="#555555">DATE</font></td></tr>
+<tr><td align="left" port="effective_to">effective_to (nullable)</td><td align="left" port="effective_to_e"><font color="#555555">DATE</font></td></tr>
+<tr><td align="left" colspan="2"><i>UK (account_id, currency_code, asset_class, effective_from)</i></td></tr>
+<tr><td align="left" port="row_version">row_version</td><td align="left" port="row_version_e"><font color="#555555">INT</font></td></tr>
+<tr><td align="left" port="updated_at">updated_at</td><td align="left" port="updated_at_e"><font color="#555555">TIMESTAMPTZ</font></td></tr>
+</table>>];
+client:client_id_e:e -> address:client_id:w [label="1 : 1..n"];
+client:client_id_e:e -> account:client_id:w [label="1 : 1..n"];
+account:account_id_e:e -> settlement_instruction:account_id:w [label="1 : 0..n"];
+client:parent_client_id_e:e -> client:client_id_e:e [headlabel="parent", taillabel="children", labeldistance=2.5, arrowhead=tee, arrowtail=crow];
+{rank=same; country; client; currency;}
+country -> client:incorporation_country:w [color="#999999", style=dashed, constraint=false];
+country -> address [color="#999999", style=dashed];
+country -> account [color="#999999", style=dashed];
+currency -> account [color="#999999", style=dashed];
+currency -> settlement_instruction [color="#999999", style=dashed];
+lk [shape=plaintext, fontsize=9, fontcolor="#555555", label="dashed = lookup foreign keys\n(country_code, base_currency, booking_country,\nincorporation_country, currency_code)"];
+}

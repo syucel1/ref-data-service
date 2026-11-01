@@ -1,0 +1,2 @@
+rootProject.name = 'refdata-service'
+include 'refdata-contract', 'refdata-model', 'refdata-db', 'refdata-loader-jdbc', 'refdata-server', 'refdata-client', 'refdata-integration-tests'

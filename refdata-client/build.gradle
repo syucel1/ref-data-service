@@ -1,0 +1,9 @@
+description = 'Java consumer library: connects, loads and verifies a snapshot, builds the local in-memory cache'
+dependencies {
+    api project(':refdata-model')
+    api project(':refdata-contract')
+    implementation rootProject.ext.libs.slf4j
+    implementation rootProject.ext.libs.lz4
+    implementation rootProject.ext.libs.zstd
+    runtimeOnly rootProject.ext.libs.log4j
+}
