@@ -8,6 +8,7 @@ import com.example.refdata.model.validation.ValidationPolicy;
 import com.example.refdata.protocol.v1.Codec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -83,19 +84,32 @@ public final class RefDataClient implements AutoCloseable {
     public CompletableFuture<LoadedSnapshot> loadAsync() { return loadAsync(null); }
 
     /** {@link #load(LoadedSnapshot)} on a dedicated thread; the future fails with the same exceptions. */
+    @SuppressWarnings("try") // The resource restores MDC on every exit path.
     public CompletableFuture<LoadedSnapshot> loadAsync(LoadedSnapshot knownSnapshot) {
         CompletableFuture<LoadedSnapshot> future = new CompletableFuture<>();
+        var callerContext = MDC.getCopyOfContextMap();
         Thread thread = new Thread(() -> {
-            try {
-                SnapshotLoader loader = new SnapshotLoader(settings, knownSnapshot);
-                LoadedSnapshot result = loader.load();
-                replaceKeepAlive(loader.keepAliveSession());
-                if (inspection != null) inspectionView = new InspectionServer.View(result.store(),
-                        com.example.refdata.contract.Digests.hex(result.info().getSnapshotId().toByteArray()));
-                future.complete(result);
-            } catch (Throwable t) {
-                log.error("snapshot load failed: {}", t.getMessage());
-                future.completeExceptionally(t);
+            try (LoggingContext context = new LoggingContext(callerContext)) {
+                MDC.put("rds.client", settings.clientName());
+                MDC.put("rds.instance", settings.clientInstance());
+                MDC.put("rds.load", Thread.currentThread().getName());
+                MDC.remove("rds.endpoint");
+                MDC.remove("rds.snapshot");
+                MDC.remove("rds.request");
+                MDC.remove("rds.session");
+                try {
+                    SnapshotLoader loader = new SnapshotLoader(settings, knownSnapshot);
+                    LoadedSnapshot result = loader.load();
+                    replaceKeepAlive(loader.keepAliveSession());
+                    if (inspection != null) inspectionView = new InspectionServer.View(result.store(),
+                            com.example.refdata.contract.Digests.hex(result.info().getSnapshotId().toByteArray()));
+                    future.complete(result);
+                } catch (Throwable t) {
+                    // Expected failures carry diagnostics to callers; unexpected failures keep their stack trace.
+                    if (t instanceof RefDataClientException) log.warn("snapshot load failed: {}", t.getMessage());
+                    else log.error("unexpected snapshot load failure", t);
+                    future.completeExceptionally(t);
+                }
             }
         }, "refdata-client-loader-" + LOADER_THREADS.incrementAndGet());
         thread.setDaemon(true);

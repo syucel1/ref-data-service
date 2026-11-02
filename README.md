@@ -118,4 +118,5 @@ it does not implement live delta updates. Pages capture the latest publication i
 so check the displayed snapshot/version when paging across a reload (no historical stores are retained).
 
 See `config/refdata-server.properties` for the common keys and `docs/DESIGN.md` section 16 for all of them.
-Logging: `config/log4j2.xml`.
+Logging: SLF4J with Log4j 2 for the server/demo; embedding applications choose the client's backend.
+See [logging configuration and diagnostics](docs/LOGGING.md) for levels, context fields and optional rotating files.

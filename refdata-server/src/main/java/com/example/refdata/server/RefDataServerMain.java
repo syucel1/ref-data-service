@@ -69,7 +69,6 @@ public final class RefDataServerMain {
 
     private static void fail(String message, Throwable cause) {
         log.error(message, cause);
-        System.err.println("refdata-server: " + message);
         System.exit(1);
     }
 }

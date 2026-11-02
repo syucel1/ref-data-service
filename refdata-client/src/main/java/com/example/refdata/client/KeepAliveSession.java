@@ -5,6 +5,7 @@ import com.example.refdata.protocol.v1.Envelope;
 import com.example.refdata.protocol.v1.Heartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -35,8 +36,12 @@ final class KeepAliveSession implements Closeable {
         reader.start();
     }
 
+    @SuppressWarnings("try") // The resource restores MDC on worker termination.
     private static Thread daemon(Runnable body, String name) {
-        Thread t = new Thread(body, name);
+        var context = MDC.getCopyOfContextMap();
+        Thread t = new Thread(() -> {
+            try (LoggingContext scope = new LoggingContext(context)) { body.run(); }
+        }, name);
         t.setDaemon(true);
         return t;
     }

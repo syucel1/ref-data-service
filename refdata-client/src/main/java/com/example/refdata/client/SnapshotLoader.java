@@ -19,6 +19,7 @@ import com.example.refdata.protocol.v1.SnapshotRequest;
 import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -72,6 +73,10 @@ final class SnapshotLoader {
             first = false;
             delay = null;
             Endpoint endpoint = settings.endpoints().get(Math.floorMod(hostIndex, settings.endpoints().size()));
+            MDC.put("rds.endpoint", endpoint.toString());
+            MDC.remove("rds.request");
+            MDC.remove("rds.snapshot");
+            MDC.remove("rds.session");
             stats.connections++;
             stats.phase(LoadPhase.CONNECTING);
             ServerConnection connection = null;
@@ -81,6 +86,8 @@ final class SnapshotLoader {
                 connection = ServerConnection.open(endpoint, settings.connectTimeout(), settings.readTimeout(), settings.maxFrameBytes());
                 stats.phase(LoadPhase.HANDSHAKE);
                 HelloAck ack = connection.handshake(hello());
+                MDC.put("rds.session", ack.getSessionId());
+                MDC.put("rds.snapshot", Digests.hex(ack.getCurrentSnapshot().getSnapshotId().toByteArray()));
                 if (!dataVersionAcceptable(ack.getCurrentSnapshot())) {
                     versionRejections++;
                     if (versionRejections >= settings.endpoints().size()) {
@@ -124,7 +131,7 @@ final class SnapshotLoader {
             } catch (RefDataClientException e) {
                 throw e;                                   // fatal: version, data version, integrity, validation
             } catch (RuntimeException e) {
-                log.error("unexpected error on the connection to {} in phase {}; treating it as a connection failure", endpoint, stats.phase(), e);
+                log.warn("unexpected error on the connection to {} in phase {}; treating it as a connection failure", endpoint, stats.phase(), e);
                 lastFailure = e;
                 hostIndex++;
             } finally {
@@ -171,6 +178,7 @@ final class SnapshotLoader {
         }
         boolean resume = staging != null;
         currentRequestId = nextRequestId++;
+        MDC.put("rds.request", Long.toString(currentRequestId));
         SnapshotRequest.Builder request = SnapshotRequest.newBuilder().setRequestId(currentRequestId).addAllEntityTypes(settings.entityTypes());
         if (resume) {
             request.setResumeSnapshotId(ByteString.copyFrom(staging.snapshotId())).setResumeFromSeq(staging.nextSeq());
@@ -237,6 +245,7 @@ final class SnapshotLoader {
 
     private void onBegin(SnapshotBegin begin, Endpoint endpoint, boolean resume) throws Reconnect {
         SnapshotInfo info = begin.getSnapshot();
+        MDC.put("rds.snapshot", Digests.hex(info.getSnapshotId().toByteArray()));
         if (resume) {
             if (!Arrays.equals(info.getSnapshotId().toByteArray(), staging.snapshotId()) || begin.getFirstSeq() != staging.nextSeq()) {
                 discardStaging();

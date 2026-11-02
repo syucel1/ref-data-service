@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Opt in with -Dlog4j2.configurationFile=config/log4j2-rolling.xml -->
+<Configuration status="WARN">
+  <Properties>
+    <Property name="logDir">${sys:rds.log.dir:-logs}</Property>
+    <Property name="pattern">%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%t] %logger{1} %X - %msg%n</Property>
+  </Properties>
+  <Appenders>
+    <Console name="Console" target="SYSTEM_OUT">
+      <PatternLayout pattern="${pattern}"/>
+    </Console>
+    <RollingFile name="File" fileName="${logDir}/refdata.log" filePattern="${logDir}/refdata-%i.log.gz">
+      <PatternLayout pattern="${pattern}"/>
+      <Policies><SizeBasedTriggeringPolicy size="10 MB"/></Policies>
+      <DefaultRolloverStrategy max="7"/>
+    </RollingFile>
+  </Appenders>
+  <Loggers>
+    <Logger name="io.netty" level="${sys:rds.log.netty.level:-WARN}"/>
+    <Logger name="com.example.refdata.client" level="${sys:rds.log.client.level:-INFO}"/>
+    <Logger name="com.example.refdata.server.sessions" level="${sys:rds.log.sessions.level:-INFO}"/>
+    <Root level="${sys:rds.log.level:-INFO}">
+      <AppenderRef ref="Console"/>
+      <AppenderRef ref="File"/>
+    </Root>
+  </Loggers>
+</Configuration>

@@ -12,6 +12,7 @@ dependencies {
     runtimeOnly rootProject.ext.libs.log4j
     runtimeOnly rootProject.ext.libs.derby
     testImplementation project(':refdata-db')
+    testImplementation rootProject.ext.libs.log4j
 }
 
 // gradle :refdata-server:run --args="config/refdata-server.properties"   (-Drds.* given to gradle are passed through)
@@ -23,4 +24,5 @@ application {
 tasks.named('run') {
     workingDir = rootDir
     systemProperties System.getProperties().findAll { k, v -> k.toString().startsWith('rds.') }
+    systemProperties System.getProperties().findAll { k, v -> k.toString().startsWith('log4j2.') }
 }

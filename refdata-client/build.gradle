@@ -5,5 +5,31 @@ dependencies {
     implementation rootProject.ext.libs.slf4j
     implementation rootProject.ext.libs.lz4
     implementation rootProject.ext.libs.zstd
-    runtimeOnly rootProject.ext.libs.log4j
+    testImplementation rootProject.ext.libs.log4j
 }
+
+// The demo chooses a backend explicitly; the reusable client runtime does not.
+configurations { demoLogging }
+dependencies { demoLogging rootProject.ext.libs.log4j }
+tasks.register('demo', JavaExec) {
+    group = 'application'
+    description = 'Runs the client demo: -Pargs="localhost:7400 [--lz4|--zstd]"'
+    classpath = sourceSets.main.runtimeClasspath + configurations.demoLogging
+    mainClass = 'com.example.refdata.client.RefDataClientDemo'
+    workingDir = rootDir
+    systemProperty 'log4j2.configurationFile', "${rootDir}/config/log4j2.xml"
+    systemProperties System.getProperties().findAll { k, v -> k.toString().startsWith('log4j2.') || k.toString().startsWith('rds.log.') }
+    if (project.hasProperty('args')) args project.property('args').split('\\s+')
+}
+
+tasks.register('verifyLoggingRuntime') {
+    group = 'verification'
+    description = 'Ensures the reusable client does not select a logging backend'
+    doLast {
+        def backends = configurations.runtimeClasspath.files.findAll {
+            it.name.startsWith('log4j-') || it.name.startsWith('logback-') || it.name.startsWith('slf4j-simple')
+        }
+        if (!backends.empty) throw new GradleException("Client runtime must not select a logging backend: ${backends}")
+    }
+}
+tasks.named('check') { dependsOn tasks.named('verifyLoggingRuntime') }
