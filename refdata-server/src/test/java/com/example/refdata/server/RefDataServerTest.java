@@ -17,6 +17,24 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
 public class RefDataServerTest {
+    @Test public void optionalInspectionLifecycle() throws Exception {
+        try (RefDataServer disabled = RefDataServer.startWithStore(ephemeral(), TestStores.small(), "unit")) {
+            assertEquals(-1, disabled.inspectionPort());
+        }
+        Properties p = new Properties();
+        p.setProperty("rds.tcp.port", "0");
+        p.setProperty("rds.http.port", "0");
+        p.setProperty("rds.inspection.enabled", "true");
+        p.setProperty("rds.inspection.port", "0");
+        p.setProperty("rds.io.threads", "1");
+        int port;
+        try (RefDataServer enabled = RefDataServer.startWithStore(ServerConfig.fromProperties(p), TestStores.small(), "unit")) {
+            port = enabled.inspectionPort();
+            assertEquals(200, http(port, "/?cache=CLIENT&limit=1"));
+        }
+        try { http(port, "/"); throw new AssertionError("inspection port should be closed"); }
+        catch (java.io.IOException expected) { /* closed */ }
+    }
     private static ServerConfig ephemeral() {
         Properties p = new Properties();
         p.setProperty("rds.tcp.port", "0");

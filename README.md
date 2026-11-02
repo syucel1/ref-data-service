@@ -65,5 +65,55 @@ Demo: `java -cp ... com.example.refdata.client.RefDataClientDemo localhost:7400`
 Python: `tools/python-client/run.sh --host localhost --port 7400` (see its README).
 
 ## Configuration
+
+### Optional cache inspection UI
+
+Server inspection is disabled by default. Add these properties to the server configuration:
+
+```properties
+rds.inspection.enabled=true
+rds.inspection.host=127.0.0.1
+rds.inspection.port=7402
+rds.inspection.max.page.size=100
+```
+
+Open [the local inspector](http://127.0.0.1:7402/). The host defaults to loopback independently
+of the TCP/health bind address. The port defaults to 7402; port 0 selects a free port
+(`server.inspectionPort()`). The UI shows all six cache names and counts, snapshot ID,
+data/update version, records in primary-key order, Previous/Next links, and primary-key lookup
+(country/currency code, numeric ID for the other caches). An empty key returns to paging.
+
+Client applications opt in on the builder, choosing a port per application:
+
+```java
+import com.example.refdata.model.inspection.InspectionServer;
+
+try (RefDataClient client = RefDataClient.builder()
+        .endpoints("localhost:7400").clientName("demo")
+        .inspection(new InspectionServer.Options("127.0.0.1", 7502, 100))
+        .build()) {
+    LoadedSnapshot snapshot = client.load();
+    // Browse http://127.0.0.1:7502/ while the application runs.
+}
+```
+
+Inspection returns 503 before the first successful client load, follows subsequent successful
+loads, and retains the last successful view if a load fails. Closing the client/server closes
+the inspection listener and executor. Disabled inspection opens no port or executor.
+
+Each request captures one immutable store/version pair. Inspection uses indexed lookups and
+read-only list views without copying or scanning the entire cache, taking publication locks,
+or sharing application reader/update executors. Pages default to 50 rows, with a configurable
+maximum of 1–500 (default 100); invalid limits/offsets return 400. Two dedicated daemon workers,
+a 16-request queue and a listen backlog of 16 bound inspection concurrency; overload rejects
+connections rather than running inspection on the HTTP dispatcher or application threads.
+Only GET is accepted, responses are not cached, and values are HTML-escaped. No new dependencies
+are required: this uses the existing JDK HTTP server. The inspector has no authentication;
+keep the default loopback host unless access is controlled externally.
+
+This checkout publishes a startup snapshot on the server and supports repeated client loads;
+it does not implement live delta updates. Pages capture the latest publication independently,
+so check the displayed snapshot/version when paging across a reload (no historical stores are retained).
+
 See `config/refdata-server.properties` for the common keys and `docs/DESIGN.md` section 16 for all of them.
 Logging: `config/log4j2.xml`.

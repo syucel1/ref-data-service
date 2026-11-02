@@ -1,5 +1,7 @@
 package com.example.refdata.client;
 
+import com.example.refdata.model.inspection.InspectionServer;
+
 import com.example.refdata.contract.Framing;
 import com.example.refdata.model.EntityKind;
 import com.example.refdata.model.validation.ValidationPolicy;
@@ -31,7 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * }</pre>
  *
  * Loading runs on a dedicated thread; {@link #load()} blocks, {@link #loadAsync()} does not. A client is reusable for
- * repeated loads; {@link #close()} only matters when keep-alive was requested.
+ * repeated loads; {@link #close()} stops keep-alive and optional cache inspection.
  */
 public final class RefDataClient implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(RefDataClient.class);
@@ -39,10 +41,17 @@ public final class RefDataClient implements AutoCloseable {
 
     private final ClientSettings settings;
     private volatile KeepAliveSession keepAliveSession;
+    private volatile InspectionServer.View inspectionView;
+    private final InspectionServer inspection;
 
-    private RefDataClient(ClientSettings settings) {
+    private RefDataClient(ClientSettings settings, InspectionServer.Options options) {
         this.settings = settings;
+        try { inspection = options == null ? null : new InspectionServer(options, () -> inspectionView); }
+        catch (java.io.IOException e) { throw new IllegalStateException("cannot start cache inspection", e); }
     }
+
+    /** Bound inspection port, or -1 when disabled. */
+    public int inspectionPort() { return inspection == null ? -1 : inspection.port(); }
 
     public static Builder builder() { return new Builder(); }
 
@@ -81,6 +90,8 @@ public final class RefDataClient implements AutoCloseable {
                 SnapshotLoader loader = new SnapshotLoader(settings, knownSnapshot);
                 LoadedSnapshot result = loader.load();
                 replaceKeepAlive(loader.keepAliveSession());
+                if (inspection != null) inspectionView = new InspectionServer.View(result.store(),
+                        com.example.refdata.contract.Digests.hex(result.info().getSnapshotId().toByteArray()));
                 future.complete(result);
             } catch (Throwable t) {
                 log.error("snapshot load failed: {}", t.getMessage());
@@ -97,8 +108,8 @@ public final class RefDataClient implements AutoCloseable {
         keepAliveSession = next;
     }
 
-    /** Closes the kept-alive connection, if any. Loaded stores are unaffected. */
-    @Override public void close() { replaceKeepAlive(null); }
+    /** Closes inspection and the kept-alive connection, if any. Loaded stores are unaffected. */
+    @Override public void close() { if (inspection != null) inspection.close(); replaceKeepAlive(null); }
 
     /** Collects the settings of a {@link RefDataClient}; only {@link #endpoints} and {@link #clientName} are mandatory. */
     public static final class Builder {
@@ -114,6 +125,11 @@ public final class RefDataClient implements AutoCloseable {
         private Duration backoffInitial = Duration.ofMillis(200);
         private Duration backoffMax = Duration.ofSeconds(10);
         private boolean keepAlive;
+        private InspectionServer.Options inspectionOptions;
+        /** Enable optional read-only cache inspection; default disabled. */
+        public Builder inspection(InspectionServer.Options options) {
+            inspectionOptions = Objects.requireNonNull(options); return this;
+        }
         private Long expectedDataVersion;
         private Long minDataVersion;
         private ValidationPolicy validationPolicy = ValidationPolicy.FAIL;
@@ -194,7 +210,7 @@ public final class RefDataClient implements AutoCloseable {
             return new RefDataClient(new ClientSettings(List.copyOf(endpoints), clientName,
                     clientInstance == null ? defaultInstance() : clientInstance, List.copyOf(wireTypes), List.copyOf(acceptedCodecs),
                     maxFrameBytes, startupTimeout, connectTimeout, readTimeout, backoffInitial, backoffMax, keepAlive,
-                    expectedDataVersion, minDataVersion, validationPolicy));
+                    expectedDataVersion, minDataVersion, validationPolicy), inspectionOptions);
         }
 
         private static Duration positive(Duration d, String name) {

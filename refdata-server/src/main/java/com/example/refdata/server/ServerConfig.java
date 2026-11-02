@@ -1,5 +1,7 @@
 package com.example.refdata.server;
 
+import com.example.refdata.model.inspection.InspectionServer;
+
 import com.example.refdata.contract.Framing;
 import com.example.refdata.model.EntityKind;
 import com.example.refdata.model.validation.ValidationPolicy;
@@ -43,6 +45,8 @@ public final class ServerConfig {
     public final int tcpSendBuffer;
     public final int ioThreads;
     public final int httpPort;
+    public final boolean inspectionEnabled;
+    public final InspectionServer.Options inspectionOptions;
     public final String dbUrl;
     public final String dbUser;
     private final String dbPassword;
@@ -77,6 +81,14 @@ public final class ServerConfig {
         tcpSendBuffer = (int) size("tcp.send.buffer", 0);
         ioThreads = intValue("io.threads", Runtime.getRuntime().availableProcessors());
         httpPort = intValue("http.port", 7401);
+        String enabled = string("inspection.enabled", "false");
+        if (!enabled.equalsIgnoreCase("true") && !enabled.equalsIgnoreCase("false"))
+            throw new ConfigException("rds.inspection.enabled must be true or false");
+        inspectionEnabled = Boolean.parseBoolean(enabled);
+        try {
+            inspectionOptions = new InspectionServer.Options(
+                string("inspection.host", "127.0.0.1"), intValue("inspection.port", 7402), intValue("inspection.max.page.size", 100));
+        } catch (IllegalArgumentException e) { throw new ConfigException("rds.inspection: " + e.getMessage()); }
         dbUrl = string("db.url", "");
         dbUser = string("db.user", "");
         dbPassword = string("db.password", "");
@@ -189,6 +201,10 @@ public final class ServerConfig {
         all.put(PREFIX + "tcp.send.buffer", tcpSendBuffer == 0 ? "unset" : String.valueOf(tcpSendBuffer));
         all.put(PREFIX + "io.threads", String.valueOf(ioThreads));
         all.put(PREFIX + "http.port", String.valueOf(httpPort));
+        all.put(PREFIX + "inspection.enabled", String.valueOf(inspectionEnabled));
+        all.put(PREFIX + "inspection.host", inspectionOptions.host());
+        all.put(PREFIX + "inspection.port", String.valueOf(inspectionOptions.port()));
+        all.put(PREFIX + "inspection.max.page.size", String.valueOf(inspectionOptions.maxPageSize()));
         all.put(PREFIX + "db.url", dbUrl);
         all.put(PREFIX + "db.user", dbUser);
         all.put(PREFIX + "db.password", dbPassword.isEmpty() ? "unset" : "****");

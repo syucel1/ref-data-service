@@ -28,6 +28,26 @@ import static org.junit.Assert.assertTrue;
 
 /** Drives {@link RefDataClient} against scripted {@link FakeServer}s: the happy path and every recovery rule of 13.3 it implements. */
 public class RefDataClientTest {
+    @Test public void inspectionFollowsLoadsAndClosesWithClient() throws Exception {
+        a.onConnection(new SnapshotScript(fixture));
+        int port;
+        try (RefDataClient rds = client(a).inspection(new com.example.refdata.model.inspection.InspectionServer.Options(0)).build()) {
+            port = rds.inspectionPort();
+            var http = java.net.http.HttpClient.newHttpClient();
+            var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + port)).build();
+            assertEquals(503, http.send(request, java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode());
+            LoadedSnapshot loaded = rds.load();
+            String body = http.send(request, java.net.http.HttpResponse.BodyHandlers.ofString()).body();
+            assertTrue(body.contains(Digests.hex(loaded.info().getSnapshotId().toByteArray())));
+            assertTrue(body.contains("COUNTRY</a>: 2"));
+            a.onConnection(new SnapshotScript(fixture));
+            rds.load();
+            assertEquals(200, http.send(request, java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode());
+        }
+        try (java.net.Socket ignored = new java.net.Socket("127.0.0.1", port)) {
+            throw new AssertionError("inspection port should be closed");
+        } catch (java.io.IOException expected) { /* closed */ }
+    }
     private final SnapshotFixture fixture = SnapshotFixture.sample();
     private FakeServer a;
     private FakeServer b;

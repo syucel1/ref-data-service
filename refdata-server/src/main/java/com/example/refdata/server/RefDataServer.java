@@ -1,5 +1,7 @@
 package com.example.refdata.server;
 
+import com.example.refdata.model.inspection.InspectionServer;
+
 import com.example.refdata.model.EntityKind;
 import com.example.refdata.model.RefDataSource;
 import com.example.refdata.model.RefDataStore;
@@ -34,6 +36,7 @@ public final class RefDataServer implements AutoCloseable {
     private final HealthServer health = new HealthServer(metrics);
     private final String serverId;
     private final CountDownLatch terminated = new CountDownLatch(1);
+    private InspectionServer inspection;
     private Snapshot snapshot;
     private StartupReport report;
     private RefDataTcpServer tcp;
@@ -100,6 +103,11 @@ public final class RefDataServer implements AutoCloseable {
                 rt.totalMemory() - rt.freeMemory(), rt.maxMemory(), heapEstimateBytes, heapAssumptions, loadAttempts, snapshot);
         log.info(report.toText());
         health.published(snapshot, report);
+        if (config.inspectionEnabled) {
+            var view = new InspectionServer.View(store, snapshot.snapshotIdHex());
+            try { inspection = new InspectionServer(config.inspectionOptions, () -> view); }
+            catch (IOException e) { throw new IllegalStateException("cannot start cache inspection", e); }
+        }
         health.phase("opening port");
         tcp = new RefDataTcpServer(config, snapshot, metrics, serverId, VERSION);
         tcp.onDegraded(() -> { health.phase("degraded: a stored snapshot frame failed its CRC check, restart needed"); health.ready(false); });
@@ -112,6 +120,8 @@ public final class RefDataServer implements AutoCloseable {
     public synchronized int tcpPort() { return tcp.port(); }
     /** The bound HTTP port. */
     public synchronized int httpPort() { return health.port(); }
+    /** Bound inspection port, or -1 when disabled. */
+    public int inspectionPort() { return inspection == null ? -1 : inspection.port(); }
     public Snapshot snapshot() { return snapshot; }
     public StartupReport startupReport() { return report; }
     public ServerMetrics metrics() { return metrics; }
@@ -123,6 +133,7 @@ public final class RefDataServer implements AutoCloseable {
         closed = true;
         health.phase("shutting down");
         health.ready(false);
+        if (inspection != null) inspection.close();
         if (tcp != null) tcp.shutdown();
         health.close();
         terminated.countDown();
