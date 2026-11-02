@@ -1,5 +1,7 @@
 # Reference Data Service (Java) — version 0.1
 
+**Development roadmap:** [Visual overview](docs/roadmap.html) · [Milestones and commit checklist](docs/ROADMAP.md)
+
 A static/reference data service for low-latency consumers. At startup it loads six tables from a relational
 database, validates them, builds an immutable indexed in-memory model, encodes it once into Protocol Buffers
 chunks and publishes that snapshot over a plain TCP port to any number of consumers, in any language.
