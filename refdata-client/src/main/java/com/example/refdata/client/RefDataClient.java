@@ -41,12 +41,32 @@ public final class RefDataClient implements AutoCloseable {
     private static final AtomicInteger LOADER_THREADS = new AtomicInteger();
 
     private final ClientSettings settings;
+    private final boolean live;
+    private volatile boolean closed;
+    private volatile SnapshotLoader activeLoader;
+    private volatile Thread subscriptionThread;
+    private volatile LoadedSnapshot current;
+    private final java.util.concurrent.atomic.AtomicBoolean subscribed = new java.util.concurrent.atomic.AtomicBoolean();
+    public com.example.refdata.model.RefDataStore currentStore() {
+        LoadedSnapshot s = current;
+        if (s == null) throw new IllegalStateException("no snapshot loaded");
+        return s.store();
+    }
+    private void publishCurrent(LoadedSnapshot s) {
+        current = s;
+        if (inspection != null) inspectionView = new InspectionServer.View(s.store(), com.example.refdata.contract.Digests.hex(s.info().getSnapshotId().toByteArray()));
+    }
+    private void applyUpdate(com.example.refdata.model.ChangeBatch batch) {
+        LoadedSnapshot old = current;
+        publishCurrent(new LoadedSnapshot(batch.apply(old.store()), old.info(), old.stats()));
+    }
     private volatile KeepAliveSession keepAliveSession;
     private volatile InspectionServer.View inspectionView;
     private final InspectionServer inspection;
 
-    private RefDataClient(ClientSettings settings, InspectionServer.Options options) {
+    private RefDataClient(ClientSettings settings, InspectionServer.Options options, boolean live) {
         this.settings = settings;
+        this.live = live;
         try { inspection = options == null ? null : new InspectionServer(options, () -> inspectionView); }
         catch (java.io.IOException e) { throw new IllegalStateException("cannot start cache inspection", e); }
     }
@@ -86,6 +106,8 @@ public final class RefDataClient implements AutoCloseable {
     /** {@link #load(LoadedSnapshot)} on a dedicated thread; the future fails with the same exceptions. */
     @SuppressWarnings("try") // The resource restores MDC on every exit path.
     public CompletableFuture<LoadedSnapshot> loadAsync(LoadedSnapshot knownSnapshot) {
+        if (closed) throw new IllegalStateException("client closed");
+        if (live && (knownSnapshot != null || !subscribed.compareAndSet(false, true))) throw new IllegalStateException("live subscription must start once with a full snapshot");
         CompletableFuture<LoadedSnapshot> future = new CompletableFuture<>();
         var callerContext = MDC.getCopyOfContextMap();
         Thread thread = new Thread(() -> {
@@ -98,20 +120,37 @@ public final class RefDataClient implements AutoCloseable {
                 MDC.remove("rds.request");
                 MDC.remove("rds.session");
                 try {
-                    SnapshotLoader loader = new SnapshotLoader(settings, knownSnapshot);
+                    do {
+                    try {
+                    SnapshotLoader loader = new SnapshotLoader(settings, live ? null : knownSnapshot);
+                    activeLoader = loader;
+                    if (closed) { loader.cancel(); throw new RefDataClientException("client closed"); }
+                    if (live) loader.live(this::publishCurrent, this::applyUpdate);
                     LoadedSnapshot result = loader.load();
                     replaceKeepAlive(loader.keepAliveSession());
-                    if (inspection != null) inspectionView = new InspectionServer.View(result.store(),
+                    if (!live) publishCurrent(result);
+                    if (!live && inspection != null) inspectionView = new InspectionServer.View(result.store(),
                             com.example.refdata.contract.Digests.hex(result.info().getSnapshotId().toByteArray()));
                     future.complete(result);
+                    if (!live) break;
+                    while (!closed && keepAliveSession != null && !keepAliveSession.closed()) Thread.sleep(100);
+                    if (!closed) Thread.sleep(settings.backoffInitial());
+                    } catch (RefDataClientException e) {
+                        if (!live || !future.isDone() || closed) throw e;
+                        log.warn("live subscription retry: {}", e.getMessage());
+                        Thread.sleep(settings.backoffMax());
+                    }
+                    } while (!closed);
                 } catch (Throwable t) {
                     // Expected failures carry diagnostics to callers; unexpected failures keep their stack trace.
+                    if (closed) { future.completeExceptionally(new RefDataClientException("client closed")); return; }
                     if (t instanceof RefDataClientException) log.warn("snapshot load failed: {}", t.getMessage());
                     else log.error("unexpected snapshot load failure", t);
                     future.completeExceptionally(t);
                 }
             }
         }, "refdata-client-loader-" + LOADER_THREADS.incrementAndGet());
+        subscriptionThread = thread;
         thread.setDaemon(true);
         thread.start();
         return future;
@@ -119,11 +158,12 @@ public final class RefDataClient implements AutoCloseable {
 
     private synchronized void replaceKeepAlive(KeepAliveSession next) {
         if (keepAliveSession != null) keepAliveSession.close();
+        if (closed && next != null) { next.close(); return; }
         keepAliveSession = next;
     }
 
     /** Closes inspection and the kept-alive connection, if any. Loaded stores are unaffected. */
-    @Override public void close() { if (inspection != null) inspection.close(); replaceKeepAlive(null); }
+    @Override public void close() { closed = true; if (activeLoader != null) activeLoader.cancel(); if (live && subscriptionThread != null) subscriptionThread.interrupt(); if (inspection != null) inspection.close(); replaceKeepAlive(null); }
 
     /** Collects the settings of a {@link RefDataClient}; only {@link #endpoints} and {@link #clientName} are mandatory. */
     public static final class Builder {
@@ -139,6 +179,8 @@ public final class RefDataClient implements AutoCloseable {
         private Duration backoffInitial = Duration.ofMillis(200);
         private Duration backoffMax = Duration.ofSeconds(10);
         private boolean keepAlive;
+        private boolean live;
+        public Builder liveUpdates(boolean enabled) { live = enabled; if (enabled) keepAlive = true; return this; }
         private InspectionServer.Options inspectionOptions;
         /** Enable optional read-only cache inspection; default disabled. */
         public Builder inspection(InspectionServer.Options options) {
@@ -212,6 +254,7 @@ public final class RefDataClient implements AutoCloseable {
         public Builder validationPolicy(ValidationPolicy policy) { this.validationPolicy = Objects.requireNonNull(policy); return this; }
 
         public RefDataClient build() {
+            if (live && (!keepAlive || entityTypes.size() != EntityKind.values().length)) throw new IllegalStateException("live updates require keepAlive and all entity types");
             if (endpoints.isEmpty()) throw new IllegalStateException("at least one endpoint is required");
             if (clientName == null || clientName.isBlank()) throw new IllegalStateException("clientName is required");
             EnumSet<EntityKind> kinds = EnumSet.copyOf(entityTypes);
@@ -224,7 +267,7 @@ public final class RefDataClient implements AutoCloseable {
             return new RefDataClient(new ClientSettings(List.copyOf(endpoints), clientName,
                     clientInstance == null ? defaultInstance() : clientInstance, List.copyOf(wireTypes), List.copyOf(acceptedCodecs),
                     maxFrameBytes, startupTimeout, connectTimeout, readTimeout, backoffInitial, backoffMax, keepAlive,
-                    expectedDataVersion, minDataVersion, validationPolicy), inspectionOptions);
+                    expectedDataVersion, minDataVersion, validationPolicy), inspectionOptions, live);
         }
 
         private static Duration positive(Duration d, String name) {

@@ -59,6 +59,8 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     public interface TransferGate {
         /** False once the instance must not start new transfers (design S-16). */
         boolean acceptingTransfers();
+        default boolean liveUpdates() { return false; }
+        default List<Update> updatesAfter(long version) { return List.of(); }
         /** A client's INTEGRITY_FAILURE report was confirmed against the stored frame. */
         void storedFrameCorrupt(int seq, Codec codec);
 
@@ -68,6 +70,8 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
             @Override public void storedFrameCorrupt(int seq, Codec codec) { }
         };
     }
+
+    public record Update(long baseVersion, long version, Envelope envelope) {}
 
     /** Session states (design 9.4). */
     public enum State { AWAIT_HELLO, READY, QUEUED, STREAMING, CLOSED }
@@ -88,6 +92,9 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     private int protocolMajor, protocolMinor, schemaMajor;
     private Codec codec = Codec.CODEC_NONE;
     private boolean keepAlive;
+    private boolean live, snapshotFlushed;
+    private long liveVersion;
+    private ScheduledFuture<?> updateTimer;
     private long bytesSent;
     private long bytesAcknowledged;
     private long bytesAtLastStallCheck;
@@ -222,6 +229,9 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         protocolMajor = hello.getProtocolMajor();
         protocolMinor = hello.getProtocolMinor();
         keepAlive = hello.getKeepAlive();
+        live = hello.getLiveUpdates() && gate.liveUpdates();
+        if (live && !keepAlive) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live updates require keep_alive"); return; }
+        liveVersion = snapshot.dataVersion();
         if (hello.getProtocolMajor() != Framing.PROTOCOL_MAJOR) {
             fail(ErrorCode.ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION, "protocol major " + hello.getProtocolMajor() + " not supported");
             return;
@@ -238,7 +248,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         }
         int clientMax = hello.getMaxFrameBytes() == 0 ? Framing.DEFAULT_MAX_FRAME_BYTES : hello.getMaxFrameBytes();
         int largest = snapshot.largestFrameBytes(codec);
-        if (clientMax < largest) {
+        if (clientMax < largest || live && clientMax < config.frameMaxBytes) {
             fail(ErrorCode.ERROR_CODE_FRAME_TOO_LARGE, "client accepts " + clientMax + " byte frames, the snapshot needs " + largest);
             return;
         }
@@ -246,7 +256,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         HelloAck ack = HelloAck.newBuilder().setProtocolMajor(Framing.PROTOCOL_MAJOR).setProtocolMinor(Framing.PROTOCOL_MINOR)
                 .setSchemaMajor(Framing.SCHEMA_MAJOR).setSchemaMinor(Framing.SCHEMA_MINOR).setCodec(codec)
                 .setMaxFrameBytes(Math.min(config.frameMaxBytes, clientMax)).setHeartbeatIntervalMs((int) config.heartbeatInterval.toMillis())
-                .setServerId(serverId).setServerVersion(serverVersion).setSessionId(sessionId).setCurrentSnapshot(snapshot.info()).build();
+                .setLiveUpdates(live).setServerId(serverId).setServerVersion(serverVersion).setSessionId(sessionId).setCurrentSnapshot(snapshot.info()).build();
         send(Envelope.newBuilder().setHelloAck(ack).build());
         enterReady();
         if (keepAlive) heartbeatTimer = schedulePeriodic(config.heartbeatInterval.toMillis(), this::heartbeatIfIdle);
@@ -255,6 +265,8 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
 
     private void onRequest(SnapshotRequest req) {
         long id = req.getRequestId();
+        if (live && requestId != 0) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live session already subscribed"); return; }
+        if (live && (!req.getEntityTypesList().isEmpty() || !req.getIfSnapshotId().isEmpty())) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live subscriptions require a full snapshot"); return; }
         if (id == 0) { reply(ErrorCode.ERROR_CODE_INVALID_REQUEST, 0, "request_id must be >= 1", false); return; }
         List<EntityKind> requested = resolveKinds(req.getEntityTypesList());
         if (!req.getIfSnapshotId().isEmpty() && snapshot.hasId(req.getIfSnapshotId())) {
@@ -409,7 +421,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     private void finishTransfer() {
         long chunks = 0, records = 0;
         for (EntityKind k : kinds) { EntityManifest m = snapshot.manifest(k); chunks += m.getChunkCount(); records += m.getRecordCount(); }
-        send(Envelope.newBuilder().setSnapshotEnd(SnapshotEnd.newBuilder().setRequestId(requestId).setChunksSent((int) chunks).setRecordsSent(records)
+        ChannelFuture snapshotEnd = send(Envelope.newBuilder().setSnapshotEnd(SnapshotEnd.newBuilder().setRequestId(requestId).setChunksSent((int) chunks).setRecordsSent(records)
                 .setContentSha256(snapshot.info().getContentSha256())).build());
         cancel(durationTimer);
         cancel(stallTimer);
@@ -417,9 +429,28 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         metrics.transferCompleted();
         log.info("session {} transfer {} done: client={} kinds={} firstSeq={} chunks={} records={} codec={} ms={}", sessionId, requestId, clientName,
                 kinds, firstSeq, chunks, records, codec, (System.nanoTime() - transferStartNanos) / 1_000_000);
+        if (live) snapshotEnd.addListener(f -> {
+            if (!f.isSuccess()) { ctx.close(); return; }
+            snapshotFlushed = true;
+            if (updateTimer == null) updateTimer = schedulePeriodic(50, this::pumpUpdates);
+        });
         kinds = List.of();
         if (goingAway) { sendGoAwayAndClose(); return; }
         enterReady();
+    }
+
+    private void pumpUpdates() {
+        if (!live || !snapshotFlushed || state != State.READY || goingAway) return;
+        if (!ctx.channel().isWritable()) { fail(ErrorCode.ERROR_CODE_SLOW_CONSUMER, "live consumer must resynchronise"); return; }
+        {
+            for (Update batch : gate.updatesAfter(liveVersion)) {
+                if (batch.version() <= liveVersion) continue;
+                if (batch.baseVersion() != liveVersion) { fail(ErrorCode.ERROR_CODE_SNAPSHOT_NOT_AVAILABLE, "update history expired; reload snapshot"); return; }
+                if (!ctx.channel().isWritable()) return;
+                send(batch.envelope()).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                liveVersion = batch.version();
+            }
+        }
     }
 
     private void stallCheck() {
@@ -543,6 +574,6 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     }
 
     private void cancelTimers() {
-        cancel(handshakeTimer); cancel(idleTimer); cancel(heartbeatTimer); cancel(queueTimer); cancel(durationTimer); cancel(stallTimer);
+        cancel(updateTimer); cancel(handshakeTimer); cancel(idleTimer); cancel(heartbeatTimer); cancel(queueTimer); cancel(durationTimer); cancel(stallTimer);
     }
 }

@@ -34,6 +34,7 @@ option java_multiple_files = true;
 // ---------------------------------------------------------------------------
 message Envelope {
   oneof body {
+    bytes update_batch = 11;
     Hello           hello            = 1;   // C->S, first frame on a connection
     HelloAck        hello_ack        = 2;   // S->C
     SnapshotRequest snapshot_request = 3;   // C->S
@@ -62,6 +63,7 @@ message Hello {
   string client_instance          = 6;   // host/pid or pod name
   string library_version          = 7;   // e.g. "refdata-client-java 1.2.0"
   repeated Codec accepted_codecs  = 8;   // in order of preference; NONE is always implied
+  bool live_updates = 10;
   bool   keep_alive               = 9;   // keep the connection after the snapshot (heartbeats)
 }
 
@@ -76,6 +78,7 @@ message HelloAck {
   string server_id              = 8;   // instance name
   string server_version         = 9;
   string session_id             = 10;
+  bool live_updates = 12;
   SnapshotInfo current_snapshot = 11;  // lets a client decide before requesting
 }
 

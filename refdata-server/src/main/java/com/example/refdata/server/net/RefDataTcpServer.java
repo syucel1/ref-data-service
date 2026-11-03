@@ -34,7 +34,8 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
     private static final int RECONNECT_AFTER_MS = 2_000;
 
     private final ServerConfig config;
-    private final Snapshot snapshot;
+    private volatile Snapshot snapshot;
+    private volatile java.util.List<SessionHandler.Update> updates = java.util.List.of();
     private final ServerMetrics metrics;
     private final String serverId;
     private final String serverVersion;
@@ -94,6 +95,13 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
         return ((InetSocketAddress) serverChannel.localAddress()).getPort();
     }
 
+    public synchronized void publish(Snapshot next, com.example.refdata.protocol.v1.Envelope update) {
+        var retained = new java.util.ArrayList<>(updates); retained.add(new SessionHandler.Update(next.dataVersion()-1, next.dataVersion(), update));
+        if (retained.size() > 32) retained.remove(0);
+        updates = java.util.List.copyOf(retained); snapshot = next;
+    }
+    @Override public java.util.List<SessionHandler.Update> updatesAfter(long version) { return updates; }
+    @Override public boolean liveUpdates() { return true; }
     public AdmissionController admission() { return admission; }
 
     /** Called once when a stored frame is found corrupt (design S-16): the owner should mark the instance not ready. */

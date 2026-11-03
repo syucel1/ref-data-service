@@ -53,6 +53,15 @@ final class SnapshotLoader {
     private int hostIndex;
     private int versionRejections;
     private KeepAliveSession keepAliveSession;
+    private boolean live;
+    private volatile boolean cancelled;
+    private volatile ServerConnection active;
+    void cancel() { cancelled = true; ServerConnection c = active; if (c != null) c.close(); }
+    private java.util.function.Consumer<LoadedSnapshot> initial = s -> {};
+    private java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates = b -> {};
+    SnapshotLoader live(java.util.function.Consumer<LoadedSnapshot> initial, java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates) {
+        this.live = true; this.initial = initial; this.updates = updates; return this;
+    }
 
     SnapshotLoader(ClientSettings settings, LoadedSnapshot knownSnapshot) {
         this.settings = settings;
@@ -69,6 +78,7 @@ final class SnapshotLoader {
         Duration delay = null;
         boolean first = true;
         while (true) {
+            if (cancelled) throw new RefDataClientException("load cancelled");
             if (!first) pause(delay == null ? backoff.next() : delay, lastFailure);
             first = false;
             delay = null;
@@ -84,8 +94,11 @@ final class SnapshotLoader {
             try {
                 log.info("connecting to {} (attempt {})", endpoint, stats.connections);
                 connection = ServerConnection.open(endpoint, settings.connectTimeout(), settings.readTimeout(), settings.maxFrameBytes());
+                active = connection;
+                if (cancelled) { connection.close(); throw new RefDataClientException("load cancelled"); }
                 stats.phase(LoadPhase.HANDSHAKE);
                 HelloAck ack = connection.handshake(hello());
+                if (live && !ack.getLiveUpdates()) throw new UnsupportedVersionException("server does not support live updates", null);
                 MDC.put("rds.session", ack.getSessionId());
                 MDC.put("rds.snapshot", Digests.hex(ack.getCurrentSnapshot().getSnapshotId().toByteArray()));
                 if (!dataVersionAcceptable(ack.getCurrentSnapshot())) {
@@ -146,7 +159,7 @@ final class SnapshotLoader {
         return Hello.newBuilder().setProtocolMajor(Framing.PROTOCOL_MAJOR).setProtocolMinor(Framing.PROTOCOL_MINOR)
                 .addSchemaMajors(Framing.SCHEMA_MAJOR).setMaxFrameBytes(settings.maxFrameBytes()).setClientName(settings.clientName())
                 .setClientInstance(settings.clientInstance()).setLibraryVersion(LIBRARY_VERSION)
-                .addAllAcceptedCodecs(settings.acceptedCodecs()).setKeepAlive(settings.keepAlive()).build();
+                .addAllAcceptedCodecs(settings.acceptedCodecs()).setKeepAlive(settings.keepAlive()).setLiveUpdates(live).build();
     }
 
     private boolean dataVersionAcceptable(SnapshotInfo current) {
@@ -234,8 +247,10 @@ final class SnapshotLoader {
                     }
                     staging.verifyEnd(end, settings.unfiltered());
                     stats.skippedUnknownTypeChunks = staging.skippedUnknownTypeChunks();
-                    if (settings.keepAlive() && heartbeat.isPositive()) keepAliveSession = new KeepAliveSession(connection, heartbeat);
-                    return publish();
+                    LoadedSnapshot loaded = publish();
+                    initial.accept(loaded);
+                    if (settings.keepAlive() && heartbeat.isPositive()) keepAliveSession = new KeepAliveSession(connection, heartbeat, updates);
+                    return loaded;
                 }
                 case BODY_NOT_SET -> log.debug("ignoring envelope with no known body");
                 default -> throw new ProtocolException("unexpected " + frame.getBodyCase() + " during a snapshot transfer");
