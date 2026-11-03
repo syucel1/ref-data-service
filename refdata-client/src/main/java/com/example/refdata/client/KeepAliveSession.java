@@ -26,8 +26,14 @@ final class KeepAliveSession implements Closeable {
     private final Thread reader;
     private final Thread sender;
     private volatile boolean closed;
+    private final java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates;
+    boolean closed() { return closed; }
 
     KeepAliveSession(ServerConnection connection, Duration interval) {
+        this(connection, interval, b -> {});
+    }
+    KeepAliveSession(ServerConnection connection, Duration interval, java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates) {
+        this.updates = updates;
         this.connection = connection;
         this.interval = interval;
         this.sender = daemon(this::sendLoop, "refdata-client-keepalive-send");
@@ -67,6 +73,7 @@ final class KeepAliveSession implements Closeable {
                 Envelope frame = connection.read();
                 switch (frame.getBodyCase()) {
                     case HEARTBEAT -> { }
+                    case UPDATE_BATCH -> updates.accept(com.example.refdata.contract.ChangeCodec.decode(frame.getUpdateBatch().toByteArray()));
                     case GO_AWAY -> {
                         log.info("server {} says GoAway ({}); closing kept-alive connection", connection.endpoint(), frame.getGoAway().getReason());
                         return;
@@ -78,6 +85,8 @@ final class KeepAliveSession implements Closeable {
                     default -> log.debug("ignoring {} on the kept-alive connection", frame.getBodyCase());
                 }
             }
+        } catch (RuntimeException e) {
+            log.error("live update failed; closing for resynchronisation", e);
         } catch (SocketTimeoutException e) {
             log.warn("nothing from {} for {} heartbeat intervals; closing kept-alive connection", connection.endpoint(), Framing.HEARTBEAT_MISSES);
         } catch (IOException e) {

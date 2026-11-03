@@ -1,6 +1,6 @@
 # Reference Data Service (Java) — version 0.1
 
-**Development roadmap:** [Visual overview](docs/roadmap.html) · [Milestones and commit checklist](docs/ROADMAP.md)
+**Development roadmap:** [Visual overview](roadmap.html) · [Milestones and commit checklist](ROADMAP.md)
 
 A static/reference data service for low-latency consumers. At startup it loads six tables from a relational
 database, validates them, builds an immutable indexed in-memory model, encodes it once into Protocol Buffers
@@ -10,7 +10,7 @@ Consumers keep their own in-memory copy and never touch the network or the datab
 The design is in `docs/DESIGN.md` (with diagrams); the decisions taken while implementing it are in
 `docs/IMPLEMENTATION-NOTES.md`. This version covers the server, the database loading, the chunked protobuf
 publication over TCP with framing, timeouts and limits, a Java client library and a Python sample client.
-Live updates are out of scope.
+Optional live CRUD updates are supported through the service-owned transactional admin API; see [live updates](docs/LIVE-UPDATES.md).
 
 ## What is different from the design (environment constraints)
 * **No Hibernate**: this machine cannot reach Maven Central, so the loader is plain JDBC (`refdata-loader-jdbc`)
@@ -120,3 +120,7 @@ so check the displayed snapshot/version when paging across a reload (no historic
 See `config/refdata-server.properties` for the common keys and `docs/DESIGN.md` section 16 for all of them.
 Logging: SLF4J with Log4j 2 for the server/demo; embedding applications choose the client's backend.
 See [logging configuration and diagnostics](docs/LOGGING.md) for levels, context fields and optional rotating files.
+
+## Live updates
+
+See [incremental live updates](docs/LIVE-UPDATES.md) for transactional admin writes, TCP ordering, consumer subscriptions, and operational limits.

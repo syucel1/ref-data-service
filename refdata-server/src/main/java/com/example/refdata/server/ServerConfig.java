@@ -46,6 +46,8 @@ public final class ServerConfig {
     public final int ioThreads;
     public final int httpPort;
     public final boolean inspectionEnabled;
+    public final int adminPort;
+    public final String adminToken;
     public final InspectionServer.Options inspectionOptions;
     public final String dbUrl;
     public final String dbUser;
@@ -77,6 +79,10 @@ public final class ServerConfig {
     private ServerConfig(Properties props) {
         this.props = props;
         tcpPort = intValue("tcp.port", 7400);
+        adminPort = intValue("admin.port", -1);
+        adminToken = string("admin.token", "");
+        range("admin.port", adminPort, -1, 65535);
+        if (adminPort >= 0 && adminToken.length() < 16) throw new ConfigException("rds.admin.token must contain at least 16 characters");
         bindAddress = string("tcp.bind.address", "0.0.0.0");
         tcpSendBuffer = (int) size("tcp.send.buffer", 0);
         ioThreads = intValue("io.threads", Runtime.getRuntime().availableProcessors());

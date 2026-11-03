@@ -37,7 +37,9 @@ public final class RefDataServer implements AutoCloseable {
     private final String serverId;
     private final CountDownLatch terminated = new CountDownLatch(1);
     private InspectionServer inspection;
-    private Snapshot snapshot;
+    private LiveAdminServer admin;
+    private volatile Snapshot snapshot;
+    private volatile InspectionServer.View current;
     private StartupReport report;
     private RefDataTcpServer tcp;
     private boolean closed;
@@ -103,18 +105,39 @@ public final class RefDataServer implements AutoCloseable {
                 rt.totalMemory() - rt.freeMemory(), rt.maxMemory(), heapEstimateBytes, heapAssumptions, loadAttempts, snapshot);
         log.info(report.toText());
         health.published(snapshot, report);
+        current = new InspectionServer.View(store, snapshot.snapshotIdHex());
         if (config.inspectionEnabled) {
             var view = new InspectionServer.View(store, snapshot.snapshotIdHex());
-            try { inspection = new InspectionServer(config.inspectionOptions, () -> view); }
+            try { inspection = new InspectionServer(config.inspectionOptions, () -> current); }
             catch (IOException e) { throw new IllegalStateException("cannot start cache inspection", e); }
         }
         health.phase("opening port");
         tcp = new RefDataTcpServer(config, snapshot, metrics, serverId, VERSION);
         tcp.onDegraded(() -> { health.phase("degraded: a stored snapshot frame failed its CRC check, restart needed"); health.ready(false); });
         tcp.start();
+        if (config.adminPort >= 0) {
+            try { admin = new LiveAdminServer(this, config.dbUrl, config.adminPort, config.adminToken); }
+            catch (IOException | java.sql.SQLException e) { throw new IllegalStateException("cannot start admin writer", e); }
+        }
         health.ready(true);
         log.info("ready: snapshot {} on TCP port {}, health on HTTP port {}", snapshot.snapshotIdHex(), tcp.port(), health.port());
     }
+
+    /** Publishes a validated transaction. The writer must commit its database transaction first. */
+    public synchronized void apply(com.example.refdata.model.ChangeBatch batch) throws IOException {
+        if (closed) throw new IllegalStateException("server closed");
+        byte[] bytes = com.example.refdata.contract.ChangeCodec.encode(batch);
+        if (bytes.length + 32 > config.frameMaxBytes) throw new IOException("batch exceeds configured frame size");
+        RefDataStore nextStore = batch.apply(current.store());
+        Snapshot next = new SnapshotEncoder(config.chunkTargetBytes, config.frameMaxBytes, config.codecs)
+            .encode(nextStore, snapshot.info().getSource(), System.currentTimeMillis());
+        var update = com.example.refdata.protocol.v1.Envelope.newBuilder().setUpdateBatch(com.google.protobuf.ByteString.copyFrom(bytes)).build();
+        tcp.publish(next, update);
+        snapshot = next; current = new InspectionServer.View(nextStore, next.snapshotIdHex());
+        health.published(next, report);
+    }
+    public int adminPort() { return admin == null ? -1 : admin.port(); }
+    public RefDataStore currentStore() { return current.store(); }
 
     /** The bound TCP port (the configured one, or the ephemeral one when configured as 0). */
     public synchronized int tcpPort() { return tcp.port(); }
@@ -128,11 +151,11 @@ public final class RefDataServer implements AutoCloseable {
     public ServerConfig config() { return config; }
 
     /** Planned shutdown: readiness DOWN, GoAway to every session, drain, close both ports. Idempotent. */
-    @Override public synchronized void close() {
-        if (closed) return;
-        closed = true;
+    @Override public void close() {
+        synchronized (this) { if (closed) return; closed = true; }
         health.phase("shutting down");
         health.ready(false);
+        if (admin != null) admin.close();
         if (inspection != null) inspection.close();
         if (tcp != null) tcp.shutdown();
         health.close();
