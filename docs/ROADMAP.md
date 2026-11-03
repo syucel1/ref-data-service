@@ -6,6 +6,19 @@ A path from snapshot delivery to reliable incremental updates, safe reloads and 
 
 [Open the visual roadmap](roadmap.html)
 
+## At a glance
+
+| Phase | Milestones | Outcome |
+|---|---|---|
+| 01 · Foundations | 1–3 | Agreed consistency rules, publication versions and committed change tracking |
+| 02 · Server updates | 4–6 | Validated immutable CRUD batches and an update protocol |
+| 03 · Consumer delivery | 7–10 | Ordered delivery, atomic client updates, replay and bounded queues |
+| 04 · Operations | 11–14 | Safe reloads, protected controls, recovery tests and monitoring |
+| 05 · Inspection | 15 | Readable tables, clear pagination and visible publication versions |
+
+**Start here:** milestone 1 is a documentation change defining update and consistency rules.
+Milestone 2 is the first implementation change: publication versions.
+
 ## Agreed direction
 
 - Use a transactional outbox for admin-driven database changes.
