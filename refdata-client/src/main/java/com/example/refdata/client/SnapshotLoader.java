@@ -2,6 +2,7 @@ package com.example.refdata.client;
 
 import com.example.refdata.contract.Digests;
 import com.example.refdata.contract.Framing;
+import com.example.refdata.model.ChangeBatch;
 import com.example.refdata.model.RefDataStoreBuilder;
 import com.example.refdata.model.validation.ValidationException;
 import com.example.refdata.protocol.v1.Envelope;
@@ -26,6 +27,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.function.Consumer;
 
 /**
  * One load: cycles through the hosts with back-off, performs the handshake and the snapshot conversation, keeps the
@@ -53,21 +55,37 @@ final class SnapshotLoader {
     private int hostIndex;
     private int versionRejections;
     private KeepAliveSession keepAliveSession;
-    private boolean live;
     private volatile boolean cancelled;
     private volatile ServerConnection active;
-    void cancel() { cancelled = true; ServerConnection c = active; if (c != null) c.close(); }
-    private java.util.function.Consumer<LoadedSnapshot> initial = s -> {};
-    private java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates = b -> {};
-    SnapshotLoader live(java.util.function.Consumer<LoadedSnapshot> initial, java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates) {
-        this.live = true; this.initial = initial; this.updates = updates; return this;
-    }
+
+    /** Live-update subscription: set by {@link #onLiveUpdates}. */
+    private boolean liveUpdates;
+    private Consumer<LoadedSnapshot> snapshotListener = s -> { };
+    private Consumer<ChangeBatch> updateListener = b -> { };
 
     SnapshotLoader(ClientSettings settings, LoadedSnapshot knownSnapshot) {
         this.settings = settings;
         this.knownSnapshot = knownSnapshot;
         this.backoff = new Backoff(settings.backoffInitial(), settings.backoffMax(), new Random());
         this.deadlineNanos = System.nanoTime() + settings.startupTimeout().toNanos();
+    }
+
+    /**
+     * Subscribes to live updates: the loaded snapshot is handed to {@code snapshotListener} before the kept-alive
+     * connection starts delivering batches to {@code updateListener} (on its reader thread).
+     */
+    SnapshotLoader onLiveUpdates(Consumer<LoadedSnapshot> snapshotListener, Consumer<ChangeBatch> updateListener) {
+        this.liveUpdates = true;
+        this.snapshotListener = snapshotListener;
+        this.updateListener = updateListener;
+        return this;
+    }
+
+    /** Aborts the load from another thread: closes the active connection; {@link #load()} then fails. */
+    void cancel() {
+        cancelled = true;
+        ServerConnection c = active;
+        if (c != null) c.close();
     }
 
     /** The kept-alive connection, when the settings ask for one and the load succeeded. */
@@ -98,7 +116,7 @@ final class SnapshotLoader {
                 if (cancelled) { connection.close(); throw new RefDataClientException("load cancelled"); }
                 stats.phase(LoadPhase.HANDSHAKE);
                 HelloAck ack = connection.handshake(hello());
-                if (live && !ack.getLiveUpdates()) throw new UnsupportedVersionException("server does not support live updates", null);
+                if (liveUpdates && !ack.getLiveUpdates()) throw new UnsupportedVersionException("server does not support live updates", null);
                 MDC.put("rds.session", ack.getSessionId());
                 MDC.put("rds.snapshot", Digests.hex(ack.getCurrentSnapshot().getSnapshotId().toByteArray()));
                 if (!dataVersionAcceptable(ack.getCurrentSnapshot())) {
@@ -159,7 +177,7 @@ final class SnapshotLoader {
         return Hello.newBuilder().setProtocolMajor(Framing.PROTOCOL_MAJOR).setProtocolMinor(Framing.PROTOCOL_MINOR)
                 .addSchemaMajors(Framing.SCHEMA_MAJOR).setMaxFrameBytes(settings.maxFrameBytes()).setClientName(settings.clientName())
                 .setClientInstance(settings.clientInstance()).setLibraryVersion(LIBRARY_VERSION)
-                .addAllAcceptedCodecs(settings.acceptedCodecs()).setKeepAlive(settings.keepAlive()).setLiveUpdates(live).build();
+                .addAllAcceptedCodecs(settings.acceptedCodecs()).setKeepAlive(settings.keepAlive()).setLiveUpdates(liveUpdates).build();
     }
 
     private boolean dataVersionAcceptable(SnapshotInfo current) {
@@ -248,8 +266,8 @@ final class SnapshotLoader {
                     staging.verifyEnd(end, settings.unfiltered());
                     stats.skippedUnknownTypeChunks = staging.skippedUnknownTypeChunks();
                     LoadedSnapshot loaded = publish();
-                    initial.accept(loaded);
-                    if (settings.keepAlive() && heartbeat.isPositive()) keepAliveSession = new KeepAliveSession(connection, heartbeat, updates);
+                    snapshotListener.accept(loaded);
+                    if (settings.keepAlive() && heartbeat.isPositive()) keepAliveSession = new KeepAliveSession(connection, heartbeat, updateListener);
                     return loaded;
                 }
                 case BODY_NOT_SET -> log.debug("ignoring envelope with no known body");

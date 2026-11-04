@@ -113,8 +113,7 @@ Only GET is accepted, responses are not cached, and values are HTML-escaped. No 
 are required: this uses the existing JDK HTTP server. The inspector has no authentication;
 keep the default loopback host unless access is controlled externally.
 
-This checkout publishes a startup snapshot on the server and supports repeated client loads;
-it does not implement live delta updates. Pages capture the latest publication independently,
+Pages capture the latest publication independently,
 so check the displayed snapshot/version when paging across a reload (no historical stores are retained).
 
 See `config/refdata-server.properties` for the common keys and `docs/DESIGN.md` section 16 for all of them.

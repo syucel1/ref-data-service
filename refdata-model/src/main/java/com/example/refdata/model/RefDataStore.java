@@ -60,6 +60,27 @@ public final class RefDataStore {
     public List<Account> accounts() { return Collections.unmodifiableList(Arrays.asList(accounts)); }
     public List<SettlementInstruction> settlementInstructions() { return Collections.unmodifiableList(Arrays.asList(ssis)); }
 
+    /** The rows of any kind, in primary-key order (read-only view; use the typed methods when the kind is known). */
+    public List<?> rows(EntityKind kind) {
+        return switch (kind) {
+            case COUNTRY -> countries(); case CURRENCY -> currencies(); case CLIENT -> clients();
+            case ADDRESS -> addresses(); case ACCOUNT -> accounts(); case SETTLEMENT_INSTRUCTION -> settlementInstructions();
+        };
+    }
+
+    /**
+     * Looks a row up by its textual primary key ({@link EntityKind#keyOf}): ISO code for countries and currencies,
+     * decimal id otherwise. Returns null when absent.
+     * @throws NumberFormatException when a numeric key is not a number
+     */
+    public Object findByKey(EntityKind kind, String key) {
+        return switch (kind) {
+            case COUNTRY -> country(key); case CURRENCY -> currency(key);
+            case CLIENT -> client(Long.parseLong(key)); case ADDRESS -> address(Long.parseLong(key));
+            case ACCOUNT -> account(Long.parseLong(key)); case SETTLEMENT_INSTRUCTION -> settlementInstruction(Long.parseLong(key));
+        };
+    }
+
     // ---- countries and currencies ----
     public Country country(CharSequence code) { int p = countryByCode.get(code); return p < 0 ? null : countries[p]; }
     public Country countryByIso3(CharSequence iso3) { int p = countryByIso3.get(iso3); return p < 0 ? null : countries[p]; }

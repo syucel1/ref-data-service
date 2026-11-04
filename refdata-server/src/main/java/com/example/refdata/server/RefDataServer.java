@@ -1,17 +1,24 @@
 package com.example.refdata.server;
 
-import com.example.refdata.model.inspection.InspectionServer;
-
+import com.example.refdata.contract.ChangeCodec;
+import com.example.refdata.model.ChangeBatch;
 import com.example.refdata.model.EntityKind;
 import com.example.refdata.model.RefDataSource;
 import com.example.refdata.model.RefDataStore;
+import com.example.refdata.model.RefDataStoreBuilder;
+import com.example.refdata.model.inspection.InspectionServer;
 import com.example.refdata.model.validation.ValidationReport;
+import com.example.refdata.protocol.v1.Envelope;
+import com.example.refdata.server.admin.AdminServer;
+import com.example.refdata.server.admin.ChangePublisher;
+import com.example.refdata.server.admin.ConnectionFactory;
 import com.example.refdata.server.health.HealthServer;
 import com.example.refdata.server.health.ServerMetrics;
 import com.example.refdata.server.health.StartupReport;
 import com.example.refdata.server.net.RefDataTcpServer;
 import com.example.refdata.server.snapshot.Snapshot;
 import com.example.refdata.server.snapshot.SnapshotEncoder;
+import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,22 +37,27 @@ public final class RefDataServer implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(RefDataServer.class);
     /** Reported in HelloAck.server_version. */
     public static final String VERSION = "refdata-server 0.1.0";
+    /** Frame bytes around an update_batch body (length prefix, envelope tag and length), with room to spare. */
+    private static final int UPDATE_FRAME_OVERHEAD = 32;
 
     private final ServerConfig config;
     private final ServerMetrics metrics = new ServerMetrics();
     private final HealthServer health = new HealthServer(metrics);
     private final String serverId;
     private final CountDownLatch terminated = new CountDownLatch(1);
+    private final SnapshotEncoder encoder;
     private InspectionServer inspection;
-    private LiveAdminServer admin;
+    private AdminServer admin;
     private volatile Snapshot snapshot;
-    private volatile InspectionServer.View current;
+    /** The published store and snapshot id, replaced as one reference so readers always see a matching pair. */
+    private volatile InspectionServer.View published;
     private StartupReport report;
     private RefDataTcpServer tcp;
     private boolean closed;
 
     private RefDataServer(ServerConfig config) {
         this.config = config;
+        this.encoder = new SnapshotEncoder(config.chunkTargetBytes, config.frameMaxBytes, config.codecs);
         String host;
         try { host = InetAddress.getLocalHost().getHostName(); } catch (IOException e) { host = "localhost"; }
         this.serverId = host + ":" + config.tcpPort;
@@ -98,17 +110,16 @@ public final class RefDataServer implements AutoCloseable {
                          long loadMs, long buildMs, int loadAttempts, long heapEstimateBytes, String heapAssumptions) throws InterruptedException {
         health.phase("encoding");
         long t0 = System.nanoTime();
-        snapshot = new SnapshotEncoder(config.chunkTargetBytes, config.frameMaxBytes, config.codecs).encode(store, source, System.currentTimeMillis());
+        snapshot = encoder.encode(store, source, System.currentTimeMillis());
         long encodeMs = (System.nanoTime() - t0) / 1_000_000;
         Runtime rt = Runtime.getRuntime();
         report = new StartupReport(source, preflightRows, loadedRows, store.dataVersion(), loadMs, buildMs, encodeMs, validation,
                 rt.totalMemory() - rt.freeMemory(), rt.maxMemory(), heapEstimateBytes, heapAssumptions, loadAttempts, snapshot);
         log.info(report.toText());
         health.published(snapshot, report);
-        current = new InspectionServer.View(store, snapshot.snapshotIdHex());
+        published = new InspectionServer.View(store, snapshot.snapshotIdHex());
         if (config.inspectionEnabled) {
-            var view = new InspectionServer.View(store, snapshot.snapshotIdHex());
-            try { inspection = new InspectionServer(config.inspectionOptions, () -> current); }
+            try { inspection = new InspectionServer(config.inspectionOptions, () -> published); }
             catch (IOException e) { throw new IllegalStateException("cannot start cache inspection", e); }
         }
         health.phase("opening port");
@@ -116,28 +127,53 @@ public final class RefDataServer implements AutoCloseable {
         tcp.onDegraded(() -> { health.phase("degraded: a stored snapshot frame failed its CRC check, restart needed"); health.ready(false); });
         tcp.start();
         if (config.adminPort >= 0) {
-            try { admin = new LiveAdminServer(this, config.dbUrl, config.adminPort, config.adminToken); }
-            catch (IOException | java.sql.SQLException e) { throw new IllegalStateException("cannot start admin writer", e); }
+            try {
+                admin = new AdminServer(changePublisher(), ConnectionFactory.driverManager(config.dbUrl, config.dbUser, config.dbPassword()),
+                        config.adminPort, config.adminToken, config.frameMaxBytes);
+            } catch (IOException | java.sql.SQLException e) {
+                throw new IllegalStateException("cannot start admin change endpoint", e);
+            }
         }
         health.ready(true);
         log.info("ready: snapshot {} on TCP port {}, health on HTTP port {}", snapshot.snapshotIdHex(), tcp.port(), health.port());
     }
 
-    /** Publishes a validated transaction. The writer must commit its database transaction first. */
-    public synchronized void apply(com.example.refdata.model.ChangeBatch batch) throws IOException {
+    /**
+     * Publishes a transaction that is already committed to the database: builds and validates the next store, encodes
+     * the next snapshot (new connections receive it) and sends the batch to every live session.
+     * @throws IOException when the batch does not fit one frame
+     * @throws IllegalArgumentException or {@link com.example.refdata.model.validation.ValidationException} when it does not apply
+     */
+    public synchronized void publishChanges(ChangeBatch batch) throws IOException {
         if (closed) throw new IllegalStateException("server closed");
-        byte[] bytes = com.example.refdata.contract.ChangeCodec.encode(batch);
-        if (bytes.length + 32 > config.frameMaxBytes) throw new IOException("batch exceeds configured frame size");
-        RefDataStore nextStore = batch.apply(current.store());
-        Snapshot next = new SnapshotEncoder(config.chunkTargetBytes, config.frameMaxBytes, config.codecs)
-            .encode(nextStore, snapshot.info().getSource(), System.currentTimeMillis());
-        var update = com.example.refdata.protocol.v1.Envelope.newBuilder().setUpdateBatch(com.google.protobuf.ByteString.copyFrom(bytes)).build();
-        tcp.publish(next, update);
-        snapshot = next; current = new InspectionServer.View(nextStore, next.snapshotIdHex());
+        byte[] encoded = ChangeCodec.encode(batch);
+        if (encoded.length + UPDATE_FRAME_OVERHEAD > config.frameMaxBytes) throw new IOException("batch of " + encoded.length + " bytes exceeds the frame limit " + config.frameMaxBytes);
+        RefDataStore nextStore = nextStore(batch);
+        Snapshot next = encoder.encode(nextStore, snapshot.info().getSource(), System.currentTimeMillis());
+        tcp.publishUpdate(next, Envelope.newBuilder().setUpdateBatch(ByteString.copyFrom(encoded)).build());
+        snapshot = next;
+        published = new InspectionServer.View(nextStore, next.snapshotIdHex());
         health.published(next, report);
+        log.info("published data version {} ({} changes), snapshot {}", batch.version(), batch.changes().size(), next.snapshotIdHex());
     }
+
+    /** The store a batch would produce, built with the configured index settings and the FAIL policy. */
+    private RefDataStore nextStore(ChangeBatch batch) {
+        return batch.apply(published.store(), new RefDataStoreBuilder().denseThreshold(config.indexDenseThreshold));
+    }
+
+    private ChangePublisher changePublisher() {
+        return new ChangePublisher() {
+            @Override public RefDataStore currentStore() { return RefDataServer.this.currentStore(); }
+            @Override public void publish(ChangeBatch batch) throws IOException { publishChanges(batch); }
+            @Override public RefDataStore preview(ChangeBatch batch) { return nextStore(batch); }
+        };
+    }
+
+    /** Bound admin port, or -1 when live updates are disabled. */
     public int adminPort() { return admin == null ? -1 : admin.port(); }
-    public RefDataStore currentStore() { return current.store(); }
+    /** The store currently served (changes with every published batch). */
+    public RefDataStore currentStore() { return published.store(); }
 
     /** The bound TCP port (the configured one, or the ephemeral one when configured as 0). */
     public synchronized int tcpPort() { return tcp.port(); }

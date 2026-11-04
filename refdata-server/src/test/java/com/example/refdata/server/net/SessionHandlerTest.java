@@ -44,7 +44,7 @@ public class SessionHandlerTest {
     private ServerMetrics metrics;
     private boolean accepting = true;
     private final List<Integer> corruptReports = new ArrayList<>();
-    private final SessionHandler.TransferGate gate = new SessionHandler.TransferGate() {
+    private final SessionHandler.SessionHost gate = new SessionHandler.SessionHost() {
         @Override public boolean acceptingTransfers() { return accepting; }
         @Override public void storedFrameCorrupt(int seq, Codec codec) { corruptReports.add(seq); }
     };

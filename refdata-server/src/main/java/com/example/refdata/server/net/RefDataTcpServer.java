@@ -1,6 +1,7 @@
 package com.example.refdata.server.net;
 
 import com.example.refdata.protocol.v1.Codec;
+import com.example.refdata.protocol.v1.Envelope;
 import com.example.refdata.server.ServerConfig;
 import com.example.refdata.server.health.ServerMetrics;
 import com.example.refdata.server.snapshot.Snapshot;
@@ -21,6 +22,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -28,14 +31,17 @@ import java.util.concurrent.TimeUnit;
  * and one {@link SessionHandler} per connection. {@link #shutdown()} implements the planned-shutdown sequence
  * (GoAway to every session, stop accepting, drain running transfers, close).
  */
-public final class RefDataTcpServer implements AutoCloseable, SessionHandler.TransferGate {
+public final class RefDataTcpServer implements AutoCloseable, SessionHandler.SessionHost {
     private static final Logger log = LoggerFactory.getLogger(RefDataTcpServer.class);
     /** Hint sent with GoAway and connection-limit rejections. */
     private static final int RECONNECT_AFTER_MS = 2_000;
+    /** Published updates kept for live sessions that are still catching up; one further behind must reload. */
+    static final int LIVE_UPDATE_HISTORY = 32;
 
     private final ServerConfig config;
     private volatile Snapshot snapshot;
-    private volatile java.util.List<SessionHandler.Update> updates = java.util.List.of();
+    /** The last {@link #LIVE_UPDATE_HISTORY} updates, oldest first; replaced (never mutated) on each publication. */
+    private volatile List<SessionHandler.LiveUpdate> liveUpdates = List.of();
     private final ServerMetrics metrics;
     private final String serverId;
     private final String serverVersion;
@@ -95,13 +101,32 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
         return ((InetSocketAddress) serverChannel.localAddress()).getPort();
     }
 
-    public synchronized void publish(Snapshot next, com.example.refdata.protocol.v1.Envelope update) {
-        var retained = new java.util.ArrayList<>(updates); retained.add(new SessionHandler.Update(next.dataVersion()-1, next.dataVersion(), update));
-        if (retained.size() > 32) retained.remove(0);
-        updates = java.util.List.copyOf(retained); snapshot = next;
+    /**
+     * Publishes the next data version: new connections get {@code next}; live sessions get {@code update} (an
+     * {@code update_batch} envelope moving from {@code next.dataVersion() - 1}) pushed to them at once.
+     * The update is recorded before the snapshot is switched, so a session never misses the step between the
+     * snapshot it was given and the updates after it.
+     */
+    public synchronized void publishUpdate(Snapshot next, Envelope update) {
+        List<SessionHandler.LiveUpdate> retained = new ArrayList<>(liveUpdates);
+        retained.add(new SessionHandler.LiveUpdate(next.dataVersion() - 1, next.dataVersion(), update));
+        if (retained.size() > LIVE_UPDATE_HISTORY) retained.remove(0);
+        liveUpdates = List.copyOf(retained);
+        snapshot = next;
+        for (Channel ch : sessions) {
+            SessionHandler s = ch.pipeline().get(SessionHandler.class);
+            if (s != null) s.deliverLiveUpdates();
+        }
     }
-    @Override public java.util.List<SessionHandler.Update> updatesAfter(long version) { return updates; }
-    @Override public boolean liveUpdates() { return true; }
+
+    @Override public List<SessionHandler.LiveUpdate> updatesAfter(long afterVersion) {
+        List<SessionHandler.LiveUpdate> all = liveUpdates;
+        int from = 0;
+        while (from < all.size() && all.get(from).version() <= afterVersion) from++;
+        return all.subList(from, all.size());
+    }
+
+    @Override public boolean liveUpdatesEnabled() { return true; }
     public AdmissionController admission() { return admission; }
 
     /** Called once when a stored frame is found corrupt (design S-16): the owner should mark the instance not ready. */

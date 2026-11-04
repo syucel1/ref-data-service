@@ -1,5 +1,6 @@
 package com.example.refdata.server;
 
+import com.example.refdata.server.admin.AdminServer;
 import com.example.refdata.model.inspection.InspectionServer;
 
 import com.example.refdata.contract.Framing;
@@ -46,7 +47,9 @@ public final class ServerConfig {
     public final int ioThreads;
     public final int httpPort;
     public final boolean inspectionEnabled;
+    /** Port of the live-update admin endpoint (loopback only); -1 = live updates disabled, 0 = any free port. */
     public final int adminPort;
+    /** Bearer token of the admin endpoint (kept out of {@link #toString()}). */
     public final String adminToken;
     public final InspectionServer.Options inspectionOptions;
     public final String dbUrl;
@@ -81,8 +84,6 @@ public final class ServerConfig {
         tcpPort = intValue("tcp.port", 7400);
         adminPort = intValue("admin.port", -1);
         adminToken = string("admin.token", "");
-        range("admin.port", adminPort, -1, 65535);
-        if (adminPort >= 0 && adminToken.length() < 16) throw new ConfigException("rds.admin.token must contain at least 16 characters");
         bindAddress = string("tcp.bind.address", "0.0.0.0");
         tcpSendBuffer = (int) size("tcp.send.buffer", 0);
         ioThreads = intValue("io.threads", Runtime.getRuntime().availableProcessors());
@@ -159,6 +160,10 @@ public final class ServerConfig {
     public void validate() {
         range("tcp.port", tcpPort, 0, 65535);     // 0 = any free port (tests, embedded use)
         range("http.port", httpPort, 0, 65535);
+        range("admin.port", adminPort, -1, 65535);
+        if (adminPort >= 0 && adminToken.length() < AdminServer.MIN_TOKEN_LENGTH)
+            throw new ConfigException(PREFIX + "admin.token must contain at least " + AdminServer.MIN_TOKEN_LENGTH + " characters when " + PREFIX + "admin.port is set");
+        if (adminPort >= 0 && dbUrl.isEmpty()) throw new ConfigException(PREFIX + "admin.port requires " + PREFIX + "db.url");
         if (httpPort == tcpPort && tcpPort != 0) throw new ConfigException(PREFIX + "http.port must differ from " + PREFIX + "tcp.port");
         positive("io.threads", ioThreads);
         nonNegative("tcp.send.buffer", tcpSendBuffer);
@@ -207,6 +212,8 @@ public final class ServerConfig {
         all.put(PREFIX + "tcp.send.buffer", tcpSendBuffer == 0 ? "unset" : String.valueOf(tcpSendBuffer));
         all.put(PREFIX + "io.threads", String.valueOf(ioThreads));
         all.put(PREFIX + "http.port", String.valueOf(httpPort));
+        all.put(PREFIX + "admin.port", adminPort < 0 ? "disabled" : String.valueOf(adminPort));
+        all.put(PREFIX + "admin.token", adminToken.isEmpty() ? "unset" : "****");
         all.put(PREFIX + "inspection.enabled", String.valueOf(inspectionEnabled));
         all.put(PREFIX + "inspection.host", inspectionOptions.host());
         all.put(PREFIX + "inspection.port", String.valueOf(inspectionOptions.port()));
