@@ -13,4 +13,16 @@ public interface RefDataSink {
     void address(Address a);
     void account(Account a);
     void settlementInstruction(SettlementInstruction s);
+
+    /** Routes a record of the given kind to its typed method (for code that handles all kinds generically). */
+    default void accept(EntityKind kind, Object record) {
+        switch (kind) {
+            case COUNTRY -> country((Country) record);
+            case CURRENCY -> currency((Currency) record);
+            case CLIENT -> client((Client) record);
+            case ADDRESS -> address((Address) record);
+            case ACCOUNT -> account((Account) record);
+            case SETTLEMENT_INSTRUCTION -> settlementInstruction((SettlementInstruction) record);
+        }
+    }
 }

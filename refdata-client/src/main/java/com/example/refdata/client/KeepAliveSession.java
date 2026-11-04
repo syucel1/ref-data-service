@@ -1,6 +1,8 @@
 package com.example.refdata.client;
 
+import com.example.refdata.contract.ChangeCodec;
 import com.example.refdata.contract.Framing;
+import com.example.refdata.model.ChangeBatch;
 import com.example.refdata.protocol.v1.Envelope;
 import com.example.refdata.protocol.v1.Heartbeat;
 import org.slf4j.Logger;
@@ -11,12 +13,14 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.time.Duration;
+import java.util.function.Consumer;
 
 /**
  * Keeps a connection open after the load: one thread sends a heartbeat every interval on a fixed schedule (the
  * server counts only inbound frames for its idle check), another reads and closes quietly on GoAway, an error
- * reply, a dead peer ({@link Framing#HEARTBEAT_MISSES} silent intervals) or {@link #close()} (design row C-12;
- * this library does not reconnect a kept-alive connection).
+ * reply, a dead peer ({@link Framing#HEARTBEAT_MISSES} silent intervals) or {@link #close()} (design row C-12).
+ * On a live-update subscription the reader also hands every {@code update_batch} to the update listener; the
+ * subscription in {@link RefDataClient} reloads a snapshot once this session has closed.
  */
 final class KeepAliveSession implements Closeable {
     private static final Logger log = LoggerFactory.getLogger(KeepAliveSession.class);
@@ -25,14 +29,15 @@ final class KeepAliveSession implements Closeable {
     private final Duration interval;
     private final Thread reader;
     private final Thread sender;
+    private final Consumer<ChangeBatch> updates;
     private volatile boolean closed;
-    private final java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates;
-    boolean closed() { return closed; }
 
     KeepAliveSession(ServerConnection connection, Duration interval) {
-        this(connection, interval, b -> {});
+        this(connection, interval, b -> { });
     }
-    KeepAliveSession(ServerConnection connection, Duration interval, java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates) {
+
+    /** @param updates receives each live update batch, on the reader thread; a failure closes the connection */
+    KeepAliveSession(ServerConnection connection, Duration interval, Consumer<ChangeBatch> updates) {
         this.updates = updates;
         this.connection = connection;
         this.interval = interval;
@@ -41,6 +46,9 @@ final class KeepAliveSession implements Closeable {
         sender.start();
         reader.start();
     }
+
+    /** True once the connection has ended (for any reason) or {@link #close()} was called. */
+    boolean closed() { return closed; }
 
     @SuppressWarnings("try") // The resource restores MDC on worker termination.
     private static Thread daemon(Runnable body, String name) {
@@ -73,7 +81,7 @@ final class KeepAliveSession implements Closeable {
                 Envelope frame = connection.read();
                 switch (frame.getBodyCase()) {
                     case HEARTBEAT -> { }
-                    case UPDATE_BATCH -> updates.accept(com.example.refdata.contract.ChangeCodec.decode(frame.getUpdateBatch().toByteArray()));
+                    case UPDATE_BATCH -> updates.accept(ChangeCodec.decode(frame.getUpdateBatch().toByteArray()));
                     case GO_AWAY -> {
                         log.info("server {} says GoAway ({}); closing kept-alive connection", connection.endpoint(), frame.getGoAway().getReason());
                         return;

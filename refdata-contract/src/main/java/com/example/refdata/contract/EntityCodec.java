@@ -9,8 +9,10 @@ import com.example.refdata.model.Client;
 import com.example.refdata.model.ClientType;
 import com.example.refdata.model.Country;
 import com.example.refdata.model.Currency;
+import com.example.refdata.model.EntityKind;
 import com.example.refdata.model.SettlementInstruction;
 import com.example.refdata.model.Status;
+import com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * Converts between the lean model records and the generated protobuf messages. Optional proto fields map to the
@@ -103,6 +105,31 @@ public final class EntityCodec {
         return new SettlementInstruction(p.getSsiId(), p.getAccountId(), p.getCurrencyCode(), AssetClass.fromWire(p.getAssetClassValue()),
                 p.getBeneficiaryBic(), p.getAgentBic(), p.getAgentAccount(), p.getIsDefault(), p.getEffectiveFrom(),
                 p.hasEffectiveTo() ? p.getEffectiveTo() : SettlementInstruction.OPEN_ENDED, p.getRowVersion(), p.getUpdatedAt());
+    }
+
+    // ---------------------------------------------------------------- one record of any kind <-> bytes
+    /** Serializes one model record of the given kind as its protobuf message. */
+    public static byte[] toBytes(EntityKind kind, Object record) {
+        return switch (kind) {
+            case COUNTRY -> toProto((Country) record).toByteArray();
+            case CURRENCY -> toProto((Currency) record).toByteArray();
+            case CLIENT -> toProto((Client) record).toByteArray();
+            case ADDRESS -> toProto((Address) record).toByteArray();
+            case ACCOUNT -> toProto((Account) record).toByteArray();
+            case SETTLEMENT_INSTRUCTION -> toProto((SettlementInstruction) record).toByteArray();
+        };
+    }
+
+    /** The inverse of {@link #toBytes}. */
+    public static Object fromBytes(EntityKind kind, byte[] bytes) throws InvalidProtocolBufferException {
+        return switch (kind) {
+            case COUNTRY -> fromProto(com.example.refdata.schema.v1.Country.parseFrom(bytes));
+            case CURRENCY -> fromProto(com.example.refdata.schema.v1.Currency.parseFrom(bytes));
+            case CLIENT -> fromProto(com.example.refdata.schema.v1.Client.parseFrom(bytes));
+            case ADDRESS -> fromProto(com.example.refdata.schema.v1.Address.parseFrom(bytes));
+            case ACCOUNT -> fromProto(com.example.refdata.schema.v1.Account.parseFrom(bytes));
+            case SETTLEMENT_INSTRUCTION -> fromProto(com.example.refdata.schema.v1.SettlementInstruction.parseFrom(bytes));
+        };
     }
 
     private static String nz(String s) { return s == null ? "" : s; }

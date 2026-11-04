@@ -1,6 +1,5 @@
-// DRAFT FOR REVIEW - v0.2 - not yet used by any implementation.
 // Reference Data Service - PROTOCOL contract (framing + control messages).
-// Intended repository path: refdata-contract/src/main/proto/refdata/protocol/v1/protocol.proto
+// Source of truth for the Java server and client (generated at build time); docs/protocol.proto is a copy.
 //
 // Versioned by protocol_major (this package) - independently of the entity schema
 // (refdata.schema.vN, file entities.proto). This file does not import the entity schema:
@@ -44,9 +43,11 @@ message Envelope {
     ErrorReply      error            = 8;   // both directions
     GoAway          go_away          = 9;   // S->C, planned shutdown
     SnapshotQueued  snapshot_queued  = 10;  // S->C, request waits for an admission slot
+    bytes           update_batch     = 11;  // S->C, live sessions only, after SnapshotEnd: one committed
+                                            // transaction in the ChangeCodec binary format (see LIVE-UPDATES.md)
   }
-  // Field numbers 11-99 are kept free (deliberately NOT declared 'reserved') for future
-  // control and live-update messages. A server that finds no known body (body not set)
+  // Field numbers 12-99 are kept free (deliberately NOT declared 'reserved') for future
+  // control messages. A server that finds no known body (body not set)
   // answers ERROR_CODE_UNSUPPORTED_MESSAGE and carries on; a client ignores it.
 }
 
@@ -63,6 +64,7 @@ message Hello {
   string library_version          = 7;   // e.g. "refdata-client-java 1.2.0"
   repeated Codec accepted_codecs  = 8;   // in order of preference; NONE is always implied
   bool   keep_alive               = 9;   // keep the connection after the snapshot (heartbeats)
+  bool   live_updates             = 10;  // subscribe to update_batch after a full snapshot (requires keep_alive)
 }
 
 message HelloAck {
@@ -77,6 +79,7 @@ message HelloAck {
   string server_version         = 9;
   string session_id             = 10;
   SnapshotInfo current_snapshot = 11;  // lets a client decide before requesting
+  bool   live_updates           = 12;  // true when the server accepted the live-update subscription
 }
 
 enum Codec {

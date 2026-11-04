@@ -28,8 +28,11 @@ REFDATA_OUTBOX automatically in that database. Use one reference-data writer ser
 per embedded database. Start administration only after the service is ready.
 
 POST /changes accepts ChangeCodec.encode(ChangeBatch) as its binary body and requires
-Authorization: Bearer <token>. Responses: 204 committed and published; 401 unauthorized;
-409 invalid mutation/version; 413 oversized body; 503 database/publication failure.
+Authorization: Bearer <token>. Responses: 204 committed and published; 400 malformed body;
+401 unauthorized; 409 invalid mutation/version or a result that fails validation;
+413 oversized body; 503 database/publication failure. Every non-2xx outcome is logged by
+`com.example.refdata.server.admin.AdminServer` (implementation: `AdminServer` for HTTP,
+`ChangeWriter` for the transactional write, `OutboxRelay` for publication).
 After an ambiguous response, inspect the current version before retrying. A stale base
 version is rejected, so blindly replaying a committed transaction does not apply it twice.
 The endpoint is deliberately not an arbitrary SQL execution API.
@@ -82,7 +85,8 @@ the store data/update version advances with each applied batch.
 - A batch contains at most 1,000 mutations and 512 KiB of encoded payload, and must fit the
   configured TCP frame limit. The admin executor has one worker and a 16-request queue.
 - A shared immutable journal retains 32 batches (at most about 16 MiB of payload).
-  Sessions inspect it every 50 ms after snapshot completion; no unbounded per-client queue.
+  Each publication is pushed to live sessions at once (with a 50 ms re-check as a fallback) after
+  snapshot completion; no unbounded per-client queue.
 - Slow consumers are disconnected or forced to reload when the retained history is insufficient.
 - The outbox is drained every 100 ms and immediately after admin commits; old applied
   entries are pruned. Committed rows and release versions survive process restart.
