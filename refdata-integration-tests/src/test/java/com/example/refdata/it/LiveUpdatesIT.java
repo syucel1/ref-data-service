@@ -114,8 +114,44 @@ public class LiveUpdatesIT {
      var batch=update(replacement.currentStore(),"After restart");post(replacement,batch);
      awaitVersion(client,batch.version());assertEquals("After restart",client.currentStore().country("GB").name());
      assertNotEquals("After restart",old.country("GB").name());
+     // a restarted server has a new update generation: the consumer reloads instead of resuming
+     assertEquals(0,client.liveResumes());assertTrue(client.liveSnapshotReloads()>=1);
     }
    }finally{first.close();}
+  }
+ }
+
+ @Test public void droppedConsumerResumesAndReplaysUpdatesCommittedWhileItWasAway() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN);
+      var proxy=new TcpProxy("127.0.0.1",server.tcpPort());
+      var client=ItSupport.client(proxy.endpoint()).liveUpdates(true).build()) {
+   long version=client.load().store().dataVersion();
+   proxy.refuse(true);proxy.cutConnections();
+   for(int i=1;i<=3;i++){var batch=update(server.currentStore(),"While away "+i);post(server,batch);version=batch.version();}
+   assertTrue("still holds its last view",client.currentStore().dataVersion()<version);
+   proxy.refuse(false);
+   awaitVersion(client,version);
+   assertEquals("While away 3",client.currentStore().country("GB").name());
+   ItSupport.assertSameStore(ItSupport.referenceStore(db),client.currentStore());
+   assertEquals(1,client.liveResumes());assertEquals(0,client.liveSnapshotReloads());
+   // and the resumed session keeps receiving new publications
+   var after=update(server.currentStore(),"After resume");post(server,after);awaitVersion(client,after.version());
+  }
+ }
+
+ @Test public void consumerBehindTheRetainedHistoryReloadsASnapshot() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN,"rds.live.history.batches","2");
+      var proxy=new TcpProxy("127.0.0.1",server.tcpPort());
+      var client=ItSupport.client(proxy.endpoint()).liveUpdates(true).build()) {
+   client.load();
+   proxy.refuse(true);proxy.cutConnections();
+   long version=0;
+   for(int i=1;i<=3;i++){var batch=update(server.currentStore(),"Expired "+i);post(server,batch);version=batch.version();}
+   proxy.refuse(false);
+   awaitVersion(client,version);
+   assertEquals("Expired 3",client.currentStore().country("GB").name());
+   ItSupport.assertSameStore(ItSupport.referenceStore(db),client.currentStore());
+   assertEquals(0,client.liveResumes());assertEquals(1,client.liveSnapshotReloads());
   }
  }
 

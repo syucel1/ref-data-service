@@ -577,6 +577,7 @@ Serving 8 consumers at once moves ≈6.6 GB; one 10 Gb/s interface needs ≈5.3 
 | `rds.snapshot.max.duration` | 10 min | Longest transfer (P-12) |
 | `rds.heartbeat.interval` | 5 s | Heartbeats; missing 3 in a row closes the connection (P-15) |
 | `rds.shutdown.drain.timeout` | 30 s | Finish running transfers on shutdown (P-17) |
+| `rds.live.history.batches` | 32 | Update batches retained for live consumers that catch up or reconnect and resume (1–1024; see LIVE-UPDATES.md) |
 
 **Metrics (examples)**: load time and rows per table; validation errors by rule; model memory; snapshot bytes, chunks, hashes; active and queued sessions; transfers started/completed/failed by reason; bytes sent; transfer duration; stalls; SERVER_BUSY count; integrity reports; sessions by protocol/schema version and client name. Client library: load duration by phase, resumes, integrity failures, unknown-type skips, lookup misses per index, loaded data version and snapshot id.
 

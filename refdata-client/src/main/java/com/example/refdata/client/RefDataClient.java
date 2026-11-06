@@ -6,6 +6,7 @@ import com.example.refdata.contract.Framing;
 import com.example.refdata.model.EntityKind;
 import com.example.refdata.model.validation.ValidationPolicy;
 import com.example.refdata.protocol.v1.Codec;
+import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -22,6 +23,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Consumer library entry point (design sections 8.3 and 14.1): connects to one of the configured servers, loads and
@@ -35,6 +37,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * Loading runs on a dedicated thread; {@link #load()} blocks, {@link #loadAsync()} does not. A client is reusable for
  * repeated loads; {@link #close()} stops keep-alive and optional cache inspection.
+<<<<<<< Updated upstream
+=======
+ * <p><b>Live updates</b> ({@link Builder#liveUpdates(boolean)}): the first {@link #load()} returns the initial snapshot
+ * and starts a subscription that applies every published transaction; read the latest data with {@link #currentStore()}.
+ * When the connection is lost the subscription reconnects and resumes from the last applied data version, replaying
+ * the updates it missed, or loads a fresh full snapshot when the server cannot replay them (restarted or other
+ * instance, or the update history no longer reaches back). A live client may be loaded only once.
+>>>>>>> Stashed changes
  */
 public final class RefDataClient implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(RefDataClient.class);
@@ -46,8 +56,38 @@ public final class RefDataClient implements AutoCloseable {
     private volatile SnapshotLoader activeLoader;
     private volatile Thread subscriptionThread;
     private volatile LoadedSnapshot current;
+<<<<<<< Updated upstream
     private final java.util.concurrent.atomic.AtomicBoolean subscribed = new java.util.concurrent.atomic.AtomicBoolean();
     public com.example.refdata.model.RefDataStore currentStore() {
+=======
+    private volatile InspectionServer.View inspectionView;
+    private final AtomicLong liveResumes = new AtomicLong();
+    private final AtomicLong liveSnapshotReloads = new AtomicLong();
+
+    private RefDataClient(ClientSettings settings, InspectionServer.Options inspectionOptions, boolean liveUpdates) {
+        this.settings = settings;
+        this.liveUpdates = liveUpdates;
+        try { inspection = inspectionOptions == null ? null : new InspectionServer(inspectionOptions, () -> inspectionView); }
+        catch (IOException e) { throw new IllegalStateException("cannot start cache inspection", e); }
+    }
+
+    public static Builder builder() { return new Builder(); }
+
+    /** Bound inspection port, or -1 when disabled. */
+    public int inspectionPort() { return inspection == null ? -1 : inspection.port(); }
+
+    /** Live subscription: reconnects that continued from the last applied data version without a snapshot. */
+    public long liveResumes() { return liveResumes.get(); }
+
+    /** Live subscription: reconnects that had to load a full snapshot (the initial load is not counted). */
+    public long liveSnapshotReloads() { return liveSnapshotReloads.get(); }
+
+    /**
+     * The most recently loaded store; with live updates, the latest version including every applied update.
+     * @throws IllegalStateException before the first successful load
+     */
+    public RefDataStore currentStore() {
+>>>>>>> Stashed changes
         LoadedSnapshot s = current;
         if (s == null) throw new IllegalStateException("no snapshot loaded");
         return s.store();
@@ -156,6 +196,97 @@ public final class RefDataClient implements AutoCloseable {
         return future;
     }
 
+<<<<<<< Updated upstream
+=======
+    private void initLoggingContext() {
+        MDC.put("rds.client", settings.clientName());
+        MDC.put("rds.instance", settings.clientInstance());
+        MDC.put("rds.load", Thread.currentThread().getName());
+        MDC.remove("rds.endpoint");
+        MDC.remove("rds.snapshot");
+        MDC.remove("rds.request");
+        MDC.remove("rds.session");
+    }
+
+    /** A plain load: one snapshot, published as {@link #current} and returned. */
+    private LoadedSnapshot loadOnce(LoadedSnapshot knownSnapshot) {
+        SnapshotLoader loader = startLoader(knownSnapshot);
+        LoadedSnapshot result = loader.load();
+        replaceKeepAlive(loader.keepAliveSession());
+        publish(result);
+        return result;
+    }
+
+    /**
+     * The live subscription: load a full snapshot (completing {@code firstLoad}) and apply updates on the kept-alive
+     * connection until it ends; then reconnect, resuming from the last applied data version when the server still
+     * holds the updates after it, else loading a full snapshot. A connection closed because an update failed to apply
+     * always reloads. Failures before the first snapshot fail {@code firstLoad}; later ones are logged and retried
+     * after the maximum back-off. Returns when the client is closed.
+     */
+    private void runLiveSubscription(CompletableFuture<LoadedSnapshot> firstLoad) throws InterruptedException {
+        ByteString generation = ByteString.EMPTY;           // update generation of the server the data came from
+        boolean mustReload = false;
+        while (!closed) {
+            try {
+                SnapshotLoader loader = startLoader(null).onLiveUpdates(this::publish, this::applyUpdate);
+                LoadedSnapshot held = current;
+                if (firstLoad.isDone() && held != null && !generation.isEmpty() && !mustReload) loader.resumeLive(generation, held);
+                LoadedSnapshot result = loader.load();          // a snapshot is published through the listener before updates can arrive
+                generation = loader.updateGeneration();
+                mustReload = false;
+                if (firstLoad.isDone()) (loader.resumedLive() ? liveResumes : liveSnapshotReloads).incrementAndGet();
+                replaceKeepAlive(loader.keepAliveSession());
+                firstLoad.complete(result);
+                awaitKeepAliveEnd();
+                KeepAliveSession ended = keepAliveSession;
+                mustReload = ended != null && ended.updateFailed();
+                if (!closed) {
+                    log.info("live connection ended at data version {}; {}", current.store().dataVersion(),
+                            mustReload ? "reloading the snapshot after a failed update" : "reconnecting to resume");
+                    Thread.sleep(settings.backoffInitial());
+                }
+            } catch (RefDataClientException e) {
+                if (!firstLoad.isDone() || closed) throw e;
+                log.warn("live subscription reconnect failed, retrying in {}: {}", settings.backoffMax(), e.getMessage());
+                Thread.sleep(settings.backoffMax());
+            }
+        }
+    }
+
+    private SnapshotLoader startLoader(LoadedSnapshot knownSnapshot) {
+        SnapshotLoader loader = new SnapshotLoader(settings, knownSnapshot);
+        activeLoader = loader;
+        if (closed) { loader.cancel(); throw new RefDataClientException("client closed"); }
+        return loader;
+    }
+
+    private void awaitKeepAliveEnd() throws InterruptedException {
+        while (!closed && keepAliveSession != null && !keepAliveSession.closed()) Thread.sleep(100);
+    }
+
+    /** Makes a loaded snapshot the current data (and the inspection view). */
+    private void publish(LoadedSnapshot snapshot) {
+        current = snapshot;
+        if (inspection != null) inspectionView = new InspectionServer.View(snapshot.store(), Digests.hex(snapshot.info().getSnapshotId().toByteArray()));
+    }
+
+    /**
+     * Applies one live update on the keep-alive reader thread. The store's data version advances; {@code info()} and
+     * {@code stats()} still describe the snapshot the subscription started from. A batch the store already contains
+     * (a duplicate after a reconnect) is skipped. A failure (version gap, invalid result) propagates and closes the
+     * connection, which makes the subscription reload a snapshot.
+     */
+    private void applyUpdate(ChangeBatch batch) {
+        LoadedSnapshot old = current;
+        if (batch.version() <= old.store().dataVersion()) {
+            log.debug("skipping update to data version {}: the store is already at {}", batch.version(), old.store().dataVersion());
+            return;
+        }
+        publish(new LoadedSnapshot(batch.apply(old.store()), old.info(), old.stats()));
+    }
+
+>>>>>>> Stashed changes
     private synchronized void replaceKeepAlive(KeepAliveSession next) {
         if (keepAliveSession != null) keepAliveSession.close();
         if (closed && next != null) { next.close(); return; }

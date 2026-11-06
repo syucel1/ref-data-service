@@ -4,6 +4,7 @@ import com.example.refdata.protocol.v1.Codec;
 import com.example.refdata.server.ServerConfig;
 import com.example.refdata.server.health.ServerMetrics;
 import com.example.refdata.server.snapshot.Snapshot;
+import com.google.protobuf.ByteString;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
@@ -21,6 +22,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+<<<<<<< Updated upstream
+=======
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.List;
+>>>>>>> Stashed changes
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,7 +42,17 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
 
     private final ServerConfig config;
     private volatile Snapshot snapshot;
+<<<<<<< Updated upstream
     private volatile java.util.List<SessionHandler.Update> updates = java.util.List.of();
+=======
+    /** The last {@code rds.live.history.batches} updates, oldest first; replaced (never mutated) on each publication. */
+    private volatile List<SessionHandler.LiveUpdate> liveUpdates = List.of();
+    /**
+     * Identifies this instance's update history: data versions are only comparable, and the history only replayable,
+     * within one generation. Random per process, so a restart (empty history, possibly reloaded data) never matches.
+     */
+    private final ByteString generation;
+>>>>>>> Stashed changes
     private final ServerMetrics metrics;
     private final String serverId;
     private final String serverVersion;
@@ -56,6 +73,9 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
         this.serverVersion = serverVersion;
         this.admission = new AdmissionController(config.maxConcurrentSnapshots, config.snapshotQueueSize);
         this.limiter = new ConnectionLimiter(config.maxConnections, RECONNECT_AFTER_MS, metrics);
+        byte[] id = new byte[16];
+        new SecureRandom().nextBytes(id);
+        this.generation = ByteString.copyFrom(id);
     }
 
     /** Binds {@code rds.tcp.bind.address:rds.tcp.port} (port 0 = any free port) and starts accepting. */
@@ -95,6 +115,7 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
         return ((InetSocketAddress) serverChannel.localAddress()).getPort();
     }
 
+<<<<<<< Updated upstream
     public synchronized void publish(Snapshot next, com.example.refdata.protocol.v1.Envelope update) {
         var retained = new java.util.ArrayList<>(updates); retained.add(new SessionHandler.Update(next.dataVersion()-1, next.dataVersion(), update));
         if (retained.size() > 32) retained.remove(0);
@@ -102,6 +123,45 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Tra
     }
     @Override public java.util.List<SessionHandler.Update> updatesAfter(long version) { return updates; }
     @Override public boolean liveUpdates() { return true; }
+=======
+    /**
+     * Publishes the next data version: new connections get {@code next}; live sessions get {@code update} (an
+     * {@code update_batch} envelope moving from {@code next.dataVersion() - 1}) pushed to them at once.
+     * The update is recorded before the snapshot is switched, so a session never misses the step between the
+     * snapshot it was given and the updates after it.
+     */
+    public synchronized void publishUpdate(Snapshot next, Envelope update) {
+        List<SessionHandler.LiveUpdate> retained = new ArrayList<>(liveUpdates);
+        retained.add(new SessionHandler.LiveUpdate(next.dataVersion() - 1, next.dataVersion(), update));
+        while (retained.size() > config.liveHistoryBatches) retained.remove(0);
+        liveUpdates = List.copyOf(retained);
+        snapshot = next;
+        for (Channel ch : sessions) {
+            SessionHandler s = ch.pipeline().get(SessionHandler.class);
+            if (s != null) s.deliverLiveUpdates();
+        }
+    }
+
+    @Override public List<SessionHandler.LiveUpdate> updatesAfter(long afterVersion) {
+        List<SessionHandler.LiveUpdate> all = liveUpdates;
+        int from = 0;
+        while (from < all.size() && all.get(from).version() <= afterVersion) from++;
+        return all.subList(from, all.size());
+    }
+
+    /**
+     * True when a live consumer holding the data at {@code version} (of this generation) can continue without a
+     * snapshot: it is at the latest published version, or a retained update starts exactly there.
+     */
+    @Override public boolean canResumeFrom(long version) {
+        if (version == snapshot.dataVersion()) return true;
+        for (SessionHandler.LiveUpdate u : liveUpdates) if (u.baseVersion() == version) return true;
+        return false;
+    }
+
+    @Override public ByteString updateGeneration() { return generation; }
+    @Override public boolean liveUpdatesEnabled() { return true; }
+>>>>>>> Stashed changes
     public AdmissionController admission() { return admission; }
 
     /** Called once when a stored frame is found corrupt (design S-16): the owner should mark the instance not ready. */

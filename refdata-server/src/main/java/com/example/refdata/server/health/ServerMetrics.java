@@ -26,6 +26,8 @@ public final class ServerMetrics {
     private final LongAdder integrityReports = new LongAdder();
     private final LongAdder integrityFailuresConfirmed = new LongAdder();
     private final LongAdder sessionErrors = new LongAdder();
+    private final LongAdder liveResumes = new LongAdder();
+    private final LongAdder liveResumeFallbacks = new LongAdder();
     private final ConcurrentMap<String, LongAdder> transfersFailedByReason = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, LongAdder> sessionsByClient = new ConcurrentHashMap<>();
     /** Client names are client-supplied: beyond this many distinct names the rest are counted as {@value #OTHER_CLIENT}. */
@@ -53,6 +55,12 @@ public final class ServerMetrics {
     public void controlBytesSent(long bytes) { bytesSent.add(bytes); }
     public void integrityReport(boolean confirmed) { integrityReports.increment(); if (confirmed) integrityFailuresConfirmed.increment(); }
     public void sessionError() { sessionErrors.increment(); }
+    /** A live consumer reconnected and continued from its data version without a snapshot. */
+    public void liveResumed() { liveResumes.increment(); }
+    /** A live consumer asked to resume but needed a full snapshot (gap, other generation or expired history). */
+    public void liveResumeFellBack() { liveResumeFallbacks.increment(); }
+    public long liveResumes() { return liveResumes.sum(); }
+    public long liveResumeFallbacks() { return liveResumeFallbacks.sum(); }
 
     public long sessionsActive() { return sessionsActive.sum(); }
     public long sessionsQueued() { return sessionsQueued.sum(); }
@@ -84,6 +92,8 @@ public final class ServerMetrics {
         counter(sb, "rds_integrity_reports_total", integrityReports.sum());
         counter(sb, "rds_integrity_failures_confirmed_total", integrityFailuresConfirmed.sum());
         counter(sb, "rds_session_errors_total", sessionErrors.sum());
+        counter(sb, "rds_live_resumes_total", liveResumes.sum());
+        counter(sb, "rds_live_resume_fallbacks_total", liveResumeFallbacks.sum());
         labelled(sb, "rds_transfers_failed_total", "reason", transfersFailedByReason);
         labelled(sb, "rds_sessions_by_client_total", "client", sessionsByClient);
         labelled(sb, "rds_sessions_by_outcome_total", "outcome", sessionsByOutcome);

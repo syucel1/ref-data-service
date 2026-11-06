@@ -71,9 +71,35 @@ try (RefDataClient client = RefDataClient.builder()
 
 Live mode requires all entity types and keep-alive, which liveUpdates(true) enables.
 Start one subscription per client instance. Older servers are rejected explicitly in live
-mode; snapshot-only clients retain their existing wire behaviour. On connection loss,
-invalid updates or expired history, live consumers reconnect and load a fresh full snapshot.
-The last valid store remains readable during recovery. Closing the client stops its subscription.
+mode; snapshot-only clients retain their existing wire behaviour. The last valid store remains
+readable during recovery. Closing the client stops its subscription.
+
+## Reconnect, replay and resynchronise
+
+When a live connection ends (network loss, GoAway, a lagging session closed by the server),
+the client reconnects and asks to **resume** from the data version of its store instead of
+loading a snapshot:
+
+1. HelloAck carries `update_generation`, a random id of the server process's update history.
+   Data versions are only comparable, and history only replayable, within one generation; it
+   changes on every server restart (and will change on an explicit full reload).
+2. The reconnecting client sends `SnapshotRequest.live_resume {generation, data_version}`
+   when the new connection reports the generation its data came from.
+3. If the version is the server's latest, or the base of a retained batch, the server answers
+   `UpdatesResumed` and sends every retained batch after that version, in order, then carries
+   on with new publications. No snapshot, admission slot or chunk is involved.
+4. Otherwise (other generation, a gap, a version ahead of the server, expired history) the
+   server serves a full snapshot for the same request, so a fallback costs no extra round trip.
+   A client that sees a different generation in HelloAck does not ask to resume at all.
+
+Client-side rules: a batch whose version the store already has (a duplicate) is skipped; a
+batch that does not start at the store's version (a gap) or fails to apply closes the
+connection, and the next connection always loads a full snapshot rather than resuming.
+`RefDataClient.liveResumes()` and `liveSnapshotReloads()` count the two outcomes; the server
+exports `rds_live_resumes_total` and `rds_live_resume_fallbacks_total`.
+
+Compatibility: all three protocol additions are optional fields. Older servers ignore
+`live_resume` and send a snapshot; older live clients never send it.
 Snapshot IDs shown by client inspection identify the initial snapshot of the connection;
 the store data/update version advances with each applied batch.
 
@@ -81,9 +107,20 @@ the store data/update version advances with each applied batch.
 
 - A batch contains at most 1,000 mutations and 512 KiB of encoded payload, and must fit the
   configured TCP frame limit. The admin executor has one worker and a 16-request queue.
+<<<<<<< Updated upstream
 - A shared immutable journal retains 32 batches (at most about 16 MiB of payload).
   Sessions inspect it every 50 ms after snapshot completion; no unbounded per-client queue.
 - Slow consumers are disconnected or forced to reload when the retained history is insufficient.
+=======
+- A shared immutable journal retains `rds.live.history.batches` batches (default 32, at most
+  1024; each batch is at most 512 KiB, so the default holds at most about 16 MiB of payload).
+  It bounds both catch-up of slow sessions and how long a disconnected consumer can stay away
+  and still resume; the history lives in memory and is lost on restart.
+  Each publication is pushed to live sessions at once (with a 50 ms re-check as a fallback) after
+  snapshot completion; no unbounded per-client queue.
+- Slow consumers are disconnected; they resume on reconnect, or reload a snapshot when the
+  retained history no longer covers their version.
+>>>>>>> Stashed changes
 - The outbox is drained every 100 ms and immediately after admin commits; old applied
   entries are pruned. Committed rows and release versions survive process restart.
 - This version uses dataVersion as the monotonic transaction version. Each transaction
@@ -99,6 +136,9 @@ the store data/update version advances with each applied batch.
 ## Verification
 
 LiveUpdatesIT covers database persistence and restart, two simultaneous consumers,
-all-entity CRUD, rollback, and an update committed during an active TCP snapshot transfer.
+all-entity CRUD, rollback, an update committed during an active TCP snapshot transfer,
+resume with replay of updates committed while a consumer was disconnected, and the snapshot
+fallback when the retained history has expired. SessionHandlerLiveResumeTest and
+LiveResumeTest cover the resume decision, duplicates, gaps and generation changes.
 Run gradle test integrationTest. On Windows, generate protocol sources with the bundled
 Linux protoc under WSL first, then skip :refdata-contract:generateProto for the Gradle run.

@@ -31,6 +31,8 @@ import java.util.TreeMap;
 public final class ServerConfig {
     /** Prefix of every key. */
     public static final String PREFIX = "rds.";
+    /** Upper bound of {@code rds.live.history.batches}: each retained batch may hold up to 512 KiB of payload. */
+    public static final int MAX_LIVE_HISTORY_BATCHES = 1024;
 
     /** Thrown for a missing, malformed or inconsistent setting; the message names the key. */
     public static final class ConfigException extends RuntimeException {
@@ -75,6 +77,8 @@ public final class ServerConfig {
     public final Duration snapshotMaxDuration;
     public final Duration heartbeatInterval;
     public final Duration shutdownDrainTimeout;
+    /** Published update batches kept for live consumers that catch up or reconnect and resume; older ones reload a snapshot. */
+    public final int liveHistoryBatches;
 
     private ServerConfig(Properties props) {
         this.props = props;
@@ -122,6 +126,7 @@ public final class ServerConfig {
         snapshotMaxDuration = duration("snapshot.max.duration", Duration.ofMinutes(10));
         heartbeatInterval = duration("heartbeat.interval", Duration.ofSeconds(5));
         shutdownDrainTimeout = duration("shutdown.drain.timeout", Duration.ofSeconds(30));
+        liveHistoryBatches = intValue("live.history.batches", 32);
     }
 
     /** Defaults, overlaid with the {@code rds.*} system properties. */
@@ -194,6 +199,7 @@ public final class ServerConfig {
         positiveDuration("snapshot.max.duration", snapshotMaxDuration);
         positiveDuration("heartbeat.interval", heartbeatInterval);
         positiveDuration("shutdown.drain.timeout", shutdownDrainTimeout);
+        range("live.history.batches", liveHistoryBatches, 1, MAX_LIVE_HISTORY_BATCHES);
         if (heartbeatInterval.multipliedBy(Framing.HEARTBEAT_MISSES).compareTo(snapshotQueueMaxWait) > 0) {
             throw new ConfigException(PREFIX + "heartbeat.interval x " + Framing.HEARTBEAT_MISSES + " must not exceed " + PREFIX + "snapshot.queue.max.wait");
         }
@@ -207,6 +213,12 @@ public final class ServerConfig {
         all.put(PREFIX + "tcp.send.buffer", tcpSendBuffer == 0 ? "unset" : String.valueOf(tcpSendBuffer));
         all.put(PREFIX + "io.threads", String.valueOf(ioThreads));
         all.put(PREFIX + "http.port", String.valueOf(httpPort));
+<<<<<<< Updated upstream
+=======
+        all.put(PREFIX + "admin.port", adminPort < 0 ? "disabled" : String.valueOf(adminPort));
+        all.put(PREFIX + "admin.token", adminToken.isEmpty() ? "unset" : "****");
+        all.put(PREFIX + "live.history.batches", String.valueOf(liveHistoryBatches));
+>>>>>>> Stashed changes
         all.put(PREFIX + "inspection.enabled", String.valueOf(inspectionEnabled));
         all.put(PREFIX + "inspection.host", inspectionOptions.host());
         all.put(PREFIX + "inspection.port", String.valueOf(inspectionOptions.port()));

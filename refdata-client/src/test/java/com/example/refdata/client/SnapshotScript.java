@@ -14,6 +14,7 @@ import com.example.refdata.protocol.v1.SnapshotChunk;
 import com.example.refdata.protocol.v1.SnapshotInfo;
 import com.example.refdata.protocol.v1.SnapshotQueued;
 import com.example.refdata.protocol.v1.SnapshotRequest;
+import com.example.refdata.protocol.v1.UpdatesResumed;
 import com.google.protobuf.ByteString;
 
 import java.io.EOFException;
@@ -46,6 +47,8 @@ public final class SnapshotScript implements FakeServer.ConnectionScript {
     private Fault fault;
     private SnapshotInfo announcedSnapshot;
     private FakeServer.ConnectionScript afterEnd = FakeServer.Session::drain;
+    private ByteString liveGeneration;
+    private boolean acceptLiveResume;
 
     private volatile Hello hello;
     private volatile SnapshotRequest request;
@@ -70,6 +73,11 @@ public final class SnapshotScript implements FakeServer.ConnectionScript {
     /** What to do after SnapshotEnd; by default read until the client closes. */
     public SnapshotScript afterEnd(FakeServer.ConnectionScript script) { this.afterEnd = script; return this; }
 
+    /** Accept live-update subscriptions and offer this update generation in HelloAck. */
+    public SnapshotScript live(ByteString generation) { this.liveGeneration = generation; return this; }
+    /** Answer a request carrying live_resume with UpdatesResumed (then run {@link #afterEnd}) instead of a snapshot. */
+    public SnapshotScript acceptLiveResume() { this.acceptLiveResume = true; return this; }
+
     public Hello hello() { return hello; }
     public SnapshotRequest request() { return request; }
     /** Frames the client sent after the fault (the INTEGRITY_FAILURE report, for instance). */
@@ -90,7 +98,8 @@ public final class SnapshotScript implements FakeServer.ConnectionScript {
         s.send(Envelope.newBuilder().setHelloAck(HelloAck.newBuilder().setProtocolMajor(Framing.PROTOCOL_MAJOR).setProtocolMinor(Framing.PROTOCOL_MINOR)
                 .setSchemaMajor(Framing.SCHEMA_MAJOR).setSchemaMinor(Framing.SCHEMA_MINOR).setCodec(codec).setMaxFrameBytes(Framing.DEFAULT_MAX_FRAME_BYTES)
                 .setHeartbeatIntervalMs(heartbeatIntervalMs).setServerId("fake").setServerVersion("test").setSessionId("s1")
-                .setCurrentSnapshot(announcedSnapshot)).build());
+                .setCurrentSnapshot(announcedSnapshot).setLiveUpdates(liveGeneration != null && hello.getLiveUpdates())
+                .setUpdateGeneration(liveGeneration != null && hello.getLiveUpdates() ? liveGeneration : ByteString.EMPTY)).build());
 
         Envelope second;
         try {
@@ -102,6 +111,12 @@ public final class SnapshotScript implements FakeServer.ConnectionScript {
         request = second.getSnapshotRequest();
         assertTrue("request_id must be >= 1", request.getRequestId() >= 1);
         long id = request.getRequestId();
+        if (acceptLiveResume && request.hasLiveResume()) {
+            s.send(Envelope.newBuilder().setUpdatesResumed(UpdatesResumed.newBuilder().setRequestId(id)
+                    .setDataVersion(request.getLiveResume().getDataVersion()).setCurrentSnapshot(announcedSnapshot)).build());
+            afterEnd.run(s);
+            return;
+        }
 
         if (request.getIfSnapshotId().equals(fixture.info().getSnapshotId())) {
             s.send(Envelope.newBuilder().setSnapshotBegin(SnapshotBegin.newBuilder().setRequestId(id).setSnapshot(fixture.info()).setNotModified(true)).build());

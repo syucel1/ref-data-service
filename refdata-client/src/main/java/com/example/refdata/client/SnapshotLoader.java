@@ -10,12 +10,14 @@ import com.example.refdata.protocol.v1.GoAway;
 import com.example.refdata.protocol.v1.Heartbeat;
 import com.example.refdata.protocol.v1.Hello;
 import com.example.refdata.protocol.v1.HelloAck;
+import com.example.refdata.protocol.v1.LiveResume;
 import com.example.refdata.protocol.v1.SnapshotBegin;
 import com.example.refdata.protocol.v1.SnapshotChunk;
 import com.example.refdata.protocol.v1.SnapshotEnd;
 import com.example.refdata.protocol.v1.SnapshotInfo;
 import com.example.refdata.protocol.v1.SnapshotQueued;
 import com.example.refdata.protocol.v1.SnapshotRequest;
+import com.example.refdata.protocol.v1.UpdatesResumed;
 import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,12 +58,25 @@ final class SnapshotLoader {
     private boolean live;
     private volatile boolean cancelled;
     private volatile ServerConnection active;
+<<<<<<< Updated upstream
     void cancel() { cancelled = true; ServerConnection c = active; if (c != null) c.close(); }
     private java.util.function.Consumer<LoadedSnapshot> initial = s -> {};
     private java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates = b -> {};
     SnapshotLoader live(java.util.function.Consumer<LoadedSnapshot> initial, java.util.function.Consumer<com.example.refdata.model.ChangeBatch> updates) {
         this.live = true; this.initial = initial; this.updates = updates; return this;
     }
+=======
+
+    /** Live-update subscription: set by {@link #onLiveUpdates}. */
+    private boolean liveUpdates;
+    private Consumer<LoadedSnapshot> snapshotListener = s -> { };
+    private Consumer<ChangeBatch> updateListener = b -> { };
+    /** Live resume: the position to continue from and the data held at it; null = full snapshot. */
+    private LiveResume livePosition;
+    private LoadedSnapshot liveHeld;
+    private boolean resumedLive;
+    private ByteString updateGeneration = ByteString.EMPTY;
+>>>>>>> Stashed changes
 
     SnapshotLoader(ClientSettings settings, LoadedSnapshot knownSnapshot) {
         this.settings = settings;
@@ -70,6 +85,46 @@ final class SnapshotLoader {
         this.deadlineNanos = System.nanoTime() + settings.startupTimeout().toNanos();
     }
 
+<<<<<<< Updated upstream
+=======
+    /**
+     * Subscribes to live updates: the loaded snapshot is handed to {@code snapshotListener} before the kept-alive
+     * connection starts delivering batches to {@code updateListener} (on its reader thread).
+     */
+    SnapshotLoader onLiveUpdates(Consumer<LoadedSnapshot> snapshotListener, Consumer<ChangeBatch> updateListener) {
+        this.liveUpdates = true;
+        this.snapshotListener = snapshotListener;
+        this.updateListener = updateListener;
+        return this;
+    }
+
+    /**
+     * Asks to continue a live subscription from {@code held}'s data version instead of loading a snapshot. A server of
+     * the same update generation that still retains the updates after that version answers UpdatesResumed and
+     * {@link #load()} returns {@code held} unchanged (the updates then arrive on the kept-alive connection); any other
+     * server sends a full snapshot as usual.
+     */
+    SnapshotLoader resumeLive(ByteString generation, LoadedSnapshot held) {
+        if (!liveUpdates) throw new IllegalStateException("resumeLive requires onLiveUpdates");
+        this.livePosition = LiveResume.newBuilder().setGeneration(generation).setDataVersion(held.store().dataVersion()).build();
+        this.liveHeld = held;
+        return this;
+    }
+
+    /** Whether {@link #load()} continued a live subscription without a snapshot. */
+    boolean resumedLive() { return resumedLive; }
+
+    /** The update generation of the server the load succeeded on (empty when it offers no live resume). */
+    ByteString updateGeneration() { return updateGeneration; }
+
+    /** Aborts the load from another thread: closes the active connection; {@link #load()} then fails. */
+    void cancel() {
+        cancelled = true;
+        ServerConnection c = active;
+        if (c != null) c.close();
+    }
+
+>>>>>>> Stashed changes
     /** The kept-alive connection, when the settings ask for one and the load succeeded. */
     KeepAliveSession keepAliveSession() { return keepAliveSession; }
 
@@ -190,6 +245,11 @@ final class SnapshotLoader {
             discardStaging();
         }
         boolean resume = staging != null;
+        boolean liveResume = !resume && livePosition != null && !ack.getUpdateGeneration().isEmpty()
+                && ack.getUpdateGeneration().equals(livePosition.getGeneration());
+        if (!resume && livePosition != null && !liveResume) {
+            log.info("{} has another update generation (restarted or another instance); loading a full snapshot", connection.endpoint());
+        }
         currentRequestId = nextRequestId++;
         MDC.put("rds.request", Long.toString(currentRequestId));
         SnapshotRequest.Builder request = SnapshotRequest.newBuilder().setRequestId(currentRequestId).addAllEntityTypes(settings.entityTypes());
@@ -197,6 +257,9 @@ final class SnapshotLoader {
             request.setResumeSnapshotId(ByteString.copyFrom(staging.snapshotId())).setResumeFromSeq(staging.nextSeq());
             stats.resumes++;
             log.info("resuming snapshot {} from seq {} at {}", Digests.hex(staging.snapshotId()), staging.nextSeq(), connection.endpoint());
+        } else if (liveResume) {
+            request.setLiveResume(livePosition);
+            log.info("asking {} to resume live updates from data version {}", connection.endpoint(), livePosition.getDataVersion());
         } else if (knownSnapshot != null) {
             request.setIfSnapshotId(knownSnapshot.info().getSnapshotId());
         }
@@ -221,6 +284,20 @@ final class SnapshotLoader {
                     GoAway g = frame.getGoAway();
                     throw new Reconnect("GoAway " + g.getReason() + ": " + g.getMessage(), true,
                             g.getReconnectAfterMs() > 0 ? Duration.ofMillis(g.getReconnectAfterMs()) : null);
+                }
+                case UPDATES_RESUMED -> {
+                    UpdatesResumed resumed = frame.getUpdatesResumed();
+                    if (!liveResume || resumed.getRequestId() != currentRequestId || resumed.getDataVersion() != livePosition.getDataVersion()) {
+                        throw new ProtocolException("unexpected UpdatesResumed for request " + resumed.getRequestId() + " at data version " + resumed.getDataVersion());
+                    }
+                    if (!heartbeat.isPositive()) throw new ProtocolException("live session without a heartbeat interval");
+                    log.info("resumed live updates from data version {} at {} (server is at {})", resumed.getDataVersion(), connection.endpoint(),
+                            resumed.getCurrentSnapshot().getDataVersion());
+                    backoff.reset();
+                    resumedLive = true;
+                    updateGeneration = ack.getUpdateGeneration();
+                    keepAliveSession = new KeepAliveSession(connection, heartbeat, updateListener);
+                    return liveHeld;
                 }
                 case SNAPSHOT_BEGIN -> {
                     SnapshotBegin begin = frame.getSnapshotBegin();
@@ -248,8 +325,14 @@ final class SnapshotLoader {
                     staging.verifyEnd(end, settings.unfiltered());
                     stats.skippedUnknownTypeChunks = staging.skippedUnknownTypeChunks();
                     LoadedSnapshot loaded = publish();
+<<<<<<< Updated upstream
                     initial.accept(loaded);
                     if (settings.keepAlive() && heartbeat.isPositive()) keepAliveSession = new KeepAliveSession(connection, heartbeat, updates);
+=======
+                    updateGeneration = ack.getUpdateGeneration();
+                    snapshotListener.accept(loaded);
+                    if (settings.keepAlive() && heartbeat.isPositive()) keepAliveSession = new KeepAliveSession(connection, heartbeat, updateListener);
+>>>>>>> Stashed changes
                     return loaded;
                 }
                 case BODY_NOT_SET -> log.debug("ignoring envelope with no known body");
