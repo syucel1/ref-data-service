@@ -8,6 +8,7 @@ import com.example.refdata.model.RefDataStore;
 import com.example.refdata.model.inspection.InspectionServer;
 import com.example.refdata.model.validation.ValidationPolicy;
 import com.example.refdata.protocol.v1.Codec;
+import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -40,8 +41,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Loading runs on a dedicated thread; {@link #load()} blocks, {@link #loadAsync()} does not. A client is reusable for
  * repeated loads; {@link #close()} stops keep-alive and optional cache inspection.
  * <p><b>Live updates</b> ({@link Builder#liveUpdates(boolean)}): the first {@link #load()} returns the initial snapshot
- * and starts a subscription that applies every published transaction and, when the connection is lost, reloads a
- * full snapshot; read the latest data with {@link #currentStore()}. A live client may be loaded only once.
+ * and starts a subscription that applies every published transaction; read the latest data with {@link #currentStore()}.
+ * When the connection is lost the subscription reconnects and resumes from the last applied data version, replaying
+ * the updates it missed, or loads a fresh full snapshot when the server cannot replay them (restarted or other
+ * instance, or the update history no longer reaches back). A live client may be loaded only once.
  */
 public final class RefDataClient implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(RefDataClient.class);
@@ -161,25 +164,36 @@ public final class RefDataClient implements AutoCloseable {
     }
 
     /**
-     * The live subscription: load a full snapshot (completing {@code firstLoad}), apply updates on the kept-alive
-     * connection until it ends, then reload. Failures before the first snapshot fail {@code firstLoad}; later ones
-     * are logged and retried after the maximum back-off. Returns when the client is closed.
+     * The live subscription: load a full snapshot (completing {@code firstLoad}) and apply updates on the kept-alive
+     * connection until it ends; then reconnect, resuming from the last applied data version when the server still
+     * holds the updates after it, else loading a full snapshot. A connection closed because an update failed to apply
+     * always reloads. Failures before the first snapshot fail {@code firstLoad}; later ones are logged and retried
+     * after the maximum back-off. Returns when the client is closed.
      */
     private void runLiveSubscription(CompletableFuture<LoadedSnapshot> firstLoad) throws InterruptedException {
+        ByteString generation = ByteString.EMPTY;           // update generation of the server the data came from
+        boolean mustReload = false;
         while (!closed) {
             try {
                 SnapshotLoader loader = startLoader(null).onLiveUpdates(this::publish, this::applyUpdate);
-                LoadedSnapshot result = loader.load();          // publishes through the listener before updates can arrive
+                LoadedSnapshot held = current;
+                if (firstLoad.isDone() && held != null && !generation.isEmpty() && !mustReload) loader.resumeLive(generation, held);
+                LoadedSnapshot result = loader.load();          // a snapshot is published through the listener before updates can arrive
+                generation = loader.updateGeneration();
+                mustReload = false;
                 replaceKeepAlive(loader.keepAliveSession());
                 firstLoad.complete(result);
                 awaitKeepAliveEnd();
+                KeepAliveSession ended = keepAliveSession;
+                mustReload = ended != null && ended.updateFailed();
                 if (!closed) {
-                    log.info("live connection ended; reloading the snapshot");
+                    log.info("live connection ended at data version {}; {}", current.store().dataVersion(),
+                            mustReload ? "reloading the snapshot after a failed update" : "reconnecting to resume");
                     Thread.sleep(settings.backoffInitial());
                 }
             } catch (RefDataClientException e) {
                 if (!firstLoad.isDone() || closed) throw e;
-                log.warn("live subscription reload failed, retrying in {}: {}", settings.backoffMax(), e.getMessage());
+                log.warn("live subscription reconnect failed, retrying in {}: {}", settings.backoffMax(), e.getMessage());
                 Thread.sleep(settings.backoffMax());
             }
         }
@@ -204,11 +218,16 @@ public final class RefDataClient implements AutoCloseable {
 
     /**
      * Applies one live update on the keep-alive reader thread. The store's data version advances; {@code info()} and
-     * {@code stats()} still describe the snapshot the subscription started from. A failure (version gap, invalid
-     * result) propagates and closes the connection, which makes the subscription reload.
+     * {@code stats()} still describe the snapshot the subscription started from. A batch the store already contains
+     * (a duplicate after a reconnect) is skipped. A failure (version gap, invalid result) propagates and closes the
+     * connection, which makes the subscription reload a snapshot.
      */
     private void applyUpdate(ChangeBatch batch) {
         LoadedSnapshot old = current;
+        if (batch.version() <= old.store().dataVersion()) {
+            log.debug("skipping update to data version {}: the store is already at {}", batch.version(), old.store().dataVersion());
+            return;
+        }
         publish(new LoadedSnapshot(batch.apply(old.store()), old.info(), old.stats()));
     }
 

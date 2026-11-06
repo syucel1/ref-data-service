@@ -119,6 +119,24 @@ public class LiveUpdatesIT {
   }
  }
 
+ @Test public void droppedConsumerResumesAndReplaysUpdatesCommittedWhileItWasAway() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN);
+      var proxy=new TcpProxy("127.0.0.1",server.tcpPort());
+      var client=ItSupport.client(proxy.endpoint()).liveUpdates(true).build()) {
+   long version=client.load().store().dataVersion();long transfers=server.metrics().transfersCompleted();
+   proxy.refuse(true);proxy.cutConnections();
+   for(int i=1;i<=3;i++){var batch=update(server.currentStore(),"While away "+i);post(server,batch);version=batch.version();}
+   assertTrue("still holds its last view",client.currentStore().dataVersion()<version);
+   proxy.refuse(false);
+   awaitVersion(client,version);
+   assertEquals("While away 3",client.currentStore().country("GB").name());
+   ItSupport.assertSameStore(ItSupport.referenceStore(db),client.currentStore());
+   assertEquals("resumed without a snapshot transfer",transfers,server.metrics().transfersCompleted());
+   // and the resumed session keeps receiving new publications
+   var after=update(server.currentStore(),"After resume");post(server,after);awaitVersion(client,after.version());
+  }
+ }
+
  private static void send(DataOutputStream out,Envelope e)throws Exception{byte[] bytes=e.toByteArray();out.writeInt(bytes.length);out.write(bytes);out.flush();}
  private static Envelope read(DataInputStream in)throws Exception{int size=in.readInt();if(size<1||size>1048576)throw new IOException("bad frame");return Envelope.parseFrom(in.readNBytes(size));}
 }

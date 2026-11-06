@@ -35,6 +35,7 @@ final class TcpProxy implements AutoCloseable {
     private volatile IntPredicate corruptFrame = i -> false;
     private volatile long throttleBytesPerSecond;
     private volatile boolean closed;
+    private volatile boolean refusing;
 
     TcpProxy(String targetHost, int targetPort) throws IOException {
         this.targetHost = targetHost;
@@ -52,6 +53,15 @@ final class TcpProxy implements AutoCloseable {
     TcpProxy dropAfterBytes(long bytes) { this.dropAfterBytes = bytes; return this; }
     /** Flips one byte in the middle of every server-to-client frame whose index (from 0) matches. */
     TcpProxy corruptFrame(IntPredicate frameIndex) { this.corruptFrame = frameIndex; return this; }
+    /** While true, new connections are accepted and closed at once (the server looks unreachable). */
+    TcpProxy refuse(boolean refuse) { this.refusing = refuse; return this; }
+
+    /** Closes every connection forwarded so far; the proxy keeps accepting new ones. */
+    void cutConnections() {
+        for (Socket s : sockets) closeQuietly(s);
+        sockets.clear();
+    }
+
     /** Limits the server-to-client rate (0 = unlimited). */
     TcpProxy throttle(long bytesPerSecond) { this.throttleBytesPerSecond = bytesPerSecond; return this; }
 
@@ -60,6 +70,7 @@ final class TcpProxy implements AutoCloseable {
             try {
                 Socket client = listener.accept();
                 connections.incrementAndGet();
+                if (refusing) { closeQuietly(client); continue; }
                 Socket server = new Socket();
                 server.setReceiveBufferSize(SMALL_BUFFER);      // keeps the server from pushing a whole snapshot into kernel buffers
                 try {

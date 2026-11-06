@@ -12,14 +12,17 @@ import com.example.refdata.protocol.v1.GoAway;
 import com.example.refdata.protocol.v1.Heartbeat;
 import com.example.refdata.protocol.v1.Hello;
 import com.example.refdata.protocol.v1.HelloAck;
+import com.example.refdata.protocol.v1.LiveResume;
 import com.example.refdata.protocol.v1.SnapshotBegin;
 import com.example.refdata.protocol.v1.SnapshotEnd;
 import com.example.refdata.protocol.v1.SnapshotQueued;
 import com.example.refdata.protocol.v1.SnapshotRequest;
+import com.example.refdata.protocol.v1.UpdatesResumed;
 import com.example.refdata.server.ServerConfig;
 import com.example.refdata.server.health.ServerMetrics;
 import com.example.refdata.server.snapshot.EncodedChunk;
 import com.example.refdata.server.snapshot.Snapshot;
+import com.google.protobuf.ByteString;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
@@ -66,6 +69,10 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         default boolean liveUpdatesEnabled() { return false; }
         /** The retained updates with {@code version > afterVersion}, oldest first (may start later than asked when history expired). */
         default List<LiveUpdate> updatesAfter(long afterVersion) { return List.of(); }
+        /** Identifies the update history that {@link #updatesAfter} and {@link #canResumeFrom} refer to; empty = no resume. */
+        default ByteString updateGeneration() { return ByteString.EMPTY; }
+        /** Whether a consumer holding data at {@code version} of this generation can continue without a snapshot. */
+        default boolean canResumeFrom(long version) { return false; }
         /** A client's INTEGRITY_FAILURE report was confirmed against the stored frame. */
         void storedFrameCorrupt(int seq, Codec codec);
 
@@ -266,7 +273,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         HelloAck ack = HelloAck.newBuilder().setProtocolMajor(Framing.PROTOCOL_MAJOR).setProtocolMinor(Framing.PROTOCOL_MINOR)
                 .setSchemaMajor(Framing.SCHEMA_MAJOR).setSchemaMinor(Framing.SCHEMA_MINOR).setCodec(codec)
                 .setMaxFrameBytes(Math.min(config.frameMaxBytes, clientMax)).setHeartbeatIntervalMs((int) config.heartbeatInterval.toMillis())
-                .setLiveUpdates(liveUpdates).setServerId(serverId).setServerVersion(serverVersion).setSessionId(sessionId).setCurrentSnapshot(snapshot.info()).build();
+                .setLiveUpdates(liveUpdates).setUpdateGeneration(liveUpdates ? host.updateGeneration() : ByteString.EMPTY).setServerId(serverId).setServerVersion(serverVersion).setSessionId(sessionId).setCurrentSnapshot(snapshot.info()).build();
         send(Envelope.newBuilder().setHelloAck(ack).build());
         enterReady();
         if (keepAlive) heartbeatTimer = schedulePeriodic(config.heartbeatInterval.toMillis(), this::heartbeatIfIdle);
@@ -278,6 +285,12 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         if (liveUpdates && requestId != 0) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live session already subscribed"); return; }
         if (liveUpdates && (!req.getEntityTypesList().isEmpty() || !req.getIfSnapshotId().isEmpty())) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live subscriptions require a full snapshot"); return; }
         if (id == 0) { reply(ErrorCode.ERROR_CODE_INVALID_REQUEST, 0, "request_id must be >= 1", false); return; }
+        if (req.hasLiveResume()) {
+            if (!liveUpdates) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live_resume requires a live-update subscription"); return; }
+            if (!req.getResumeSnapshotId().isEmpty()) { fail(ErrorCode.ERROR_CODE_INVALID_REQUEST, "live_resume cannot be combined with a snapshot resume"); return; }
+            if (resumeLive(id, req.getLiveResume())) return;
+            // otherwise: serve a full snapshot for this request
+        }
         List<EntityKind> requested = resolveKinds(req.getEntityTypesList());
         if (!req.getIfSnapshotId().isEmpty() && snapshot.hasId(req.getIfSnapshotId())) {
             metrics.notModified();
@@ -342,6 +355,31 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
             }
             case BUSY -> serverBusy(id, "transfer slots and queue are full", (int) config.snapshotQueueMaxWait.toMillis());
         }
+    }
+
+    /**
+     * Continues a live consumer from its data version without a snapshot when this server's history allows it
+     * (same generation, and the version is current or the base of a retained update). Returns false when a full
+     * snapshot is needed instead.
+     */
+    private boolean resumeLive(long id, LiveResume position) {
+        long version = position.getDataVersion();
+        String refusal = null;
+        if (!position.getGeneration().equals(host.updateGeneration())) refusal = "other update generation (server restarted or another instance)";
+        else if (!host.canResumeFrom(version)) refusal = "data version " + version + " is outside the retained update history";
+        if (refusal != null) {
+            log.info("session {} (client {} {}) cannot resume from data version {}: {}; sending a full snapshot", sessionId, clientName, clientInstance, version, refusal);
+            return false;
+        }
+        requestId = id;
+        deliveredVersion = version;
+        log.info("session {} (client {} {}) resumed live updates from data version {} (latest {})", sessionId, clientName, clientInstance, version, snapshot.dataVersion());
+        send(Envelope.newBuilder().setUpdatesResumed(UpdatesResumed.newBuilder().setRequestId(id).setDataVersion(version).setCurrentSnapshot(snapshot.info())).build())
+                .addListener(f -> {
+                    if (!f.isSuccess()) { ctx.close(); return; }
+                    startLiveDelivery();
+                });
+        return true;
     }
 
     private void onClientError(ErrorReply err) {
@@ -441,19 +479,25 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
                 kinds, firstSeq, chunks, records, codec, (System.nanoTime() - transferStartNanos) / 1_000_000);
         if (liveUpdates) snapshotEnd.addListener(f -> {
             if (!f.isSuccess()) { ctx.close(); return; }
-            snapshotFlushed = true;                                  // updates may follow only once SnapshotEnd is on the wire
-            if (liveUpdateTimer == null) liveUpdateTimer = schedulePeriodic(LIVE_UPDATE_POLL_MS, this::deliverLiveUpdates);
-            deliverLiveUpdates();
+            startLiveDelivery();                                     // updates may follow only once SnapshotEnd is on the wire
         });
         kinds = List.of();
         if (goingAway) { sendGoAwayAndClose(); return; }
         enterReady();
     }
 
+    /** Starts sending updates after {@link #deliveredVersion}: once SnapshotEnd or UpdatesResumed is on the wire. */
+    private void startLiveDelivery() {
+        snapshotFlushed = true;
+        if (liveUpdateTimer == null) liveUpdateTimer = schedulePeriodic(LIVE_UPDATE_POLL_MS, this::deliverLiveUpdates);
+        deliverLiveUpdates();
+    }
+
     /**
      * Sends the updates published since {@link #deliveredVersion}, in order. Runs on the event loop: pushed by the
      * server on every publication and polled as a fallback. A consumer that cannot keep up (channel not writable when
-     * updates are due) or that fell behind the retained history is closed and must reload a snapshot.
+     * updates are due) or that fell behind the retained history is closed; it reconnects and resumes, or reloads a
+     * snapshot when the history no longer covers its version.
      */
     public void deliverLiveUpdates() {
         if (!ctx.executor().inEventLoop()) { ctx.executor().execute(this::deliverLiveUpdates); return; }

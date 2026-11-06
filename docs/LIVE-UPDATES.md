@@ -75,7 +75,10 @@ try (RefDataClient client = RefDataClient.builder()
 Live mode requires all entity types and keep-alive, which liveUpdates(true) enables.
 Start one subscription per client instance. Older servers are rejected explicitly in live
 mode; snapshot-only clients retain their existing wire behaviour. On connection loss,
-invalid updates or expired history, live consumers reconnect and load a fresh full snapshot.
+live consumers reconnect and resume from their last applied data version: the server replays
+the retained batches after it (`SnapshotRequest.live_resume` -> `UpdatesResumed`). After a
+server restart (new `HelloAck.update_generation`), expired history or an invalid update, they
+load a fresh full snapshot instead. Duplicate batches are skipped.
 The last valid store remains readable during recovery. Closing the client stops its subscription.
 Snapshot IDs shown by client inspection identify the initial snapshot of the connection;
 the store data/update version advances with each applied batch.
@@ -103,6 +106,7 @@ the store data/update version advances with each applied batch.
 ## Verification
 
 LiveUpdatesIT covers database persistence and restart, two simultaneous consumers,
-all-entity CRUD, rollback, and an update committed during an active TCP snapshot transfer.
+all-entity CRUD, rollback, an update committed during an active TCP snapshot transfer, and
+resume with replay of updates committed while a consumer was disconnected.
 Run gradle test integrationTest. On Windows, generate protocol sources with the bundled
 Linux protoc under WSL first, then skip :refdata-contract:generateProto for the Gradle run.

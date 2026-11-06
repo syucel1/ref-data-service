@@ -31,6 +31,7 @@ final class KeepAliveSession implements Closeable {
     private final Thread sender;
     private final Consumer<ChangeBatch> updates;
     private volatile boolean closed;
+    private volatile boolean updateFailed;
 
     KeepAliveSession(ServerConnection connection, Duration interval) {
         this(connection, interval, b -> { });
@@ -49,6 +50,9 @@ final class KeepAliveSession implements Closeable {
 
     /** True once the connection has ended (for any reason) or {@link #close()} was called. */
     boolean closed() { return closed; }
+
+    /** True when the connection was closed because a live update could not be decoded or applied. */
+    boolean updateFailed() { return updateFailed; }
 
     @SuppressWarnings("try") // The resource restores MDC on worker termination.
     private static Thread daemon(Runnable body, String name) {
@@ -94,6 +98,7 @@ final class KeepAliveSession implements Closeable {
                 }
             }
         } catch (RuntimeException e) {
+            updateFailed = true;
             log.error("live update failed; closing for resynchronisation", e);
         } catch (SocketTimeoutException e) {
             log.warn("nothing from {} for {} heartbeat intervals; closing kept-alive connection", connection.endpoint(), Framing.HEARTBEAT_MISSES);
