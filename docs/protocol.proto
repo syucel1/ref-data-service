@@ -45,8 +45,9 @@ message Envelope {
     SnapshotQueued  snapshot_queued  = 10;  // S->C, request waits for an admission slot
     bytes           update_batch     = 11;  // S->C, live sessions only, after SnapshotEnd: one committed
                                             // transaction in the ChangeCodec binary format (see LIVE-UPDATES.md)
+    UpdatesResumed  updates_resumed  = 12;  // S->C, answers a SnapshotRequest with live_resume: no snapshot follows
   }
-  // Field numbers 12-99 are kept free (deliberately NOT declared 'reserved') for future
+  // Field numbers 13-99 are kept free (deliberately NOT declared 'reserved') for future
   // control messages. A server that finds no known body (body not set)
   // answers ERROR_CODE_UNSUPPORTED_MESSAGE and carries on; a client ignores it.
 }
@@ -80,6 +81,9 @@ message HelloAck {
   string session_id             = 10;
   SnapshotInfo current_snapshot = 11;  // lets a client decide before requesting
   bool   live_updates           = 12;  // true when the server accepted the live-update subscription
+  bytes  update_generation      = 13;  // live sessions only: identifies this server's update history. A client may
+                                       // ask to resume (SnapshotRequest.live_resume) only with the same generation;
+                                       // it changes on every server restart. Empty = resume not offered
 }
 
 enum Codec {
@@ -100,6 +104,24 @@ message SnapshotRequest {
   bytes  resume_snapshot_id         = 4;   // non-empty = this is a resume of that snapshot...
   uint32 resume_from_seq            = 5;   // ...starting at this chunk; must lie inside the requested
                                            // ranges, and entity_types must equal the original request
+  LiveResume live_resume            = 6;   // live sessions only: "I hold the full data at this version". The server
+                                           // answers UpdatesResumed and replays the retained updates after it, or -
+                                           // after a gap, another generation or expired history - serves a full
+                                           // snapshot for this request as if the field were absent
+}
+
+// A live consumer's position, sent on reconnect to continue without a snapshot.
+message LiveResume {
+  bytes  generation                 = 1;   // HelloAck.update_generation of the connection the client last applied from
+  uint64 data_version               = 2;   // data version of the client's store (last applied update)
+}
+
+// Answer to a SnapshotRequest with live_resume: the session continues as if its snapshot had just ended.
+// The update_batch frames after data_version (moving from data_version onwards, in order) follow.
+message UpdatesResumed {
+  uint64 request_id                 = 1;
+  uint64 data_version               = 2;   // echoes LiveResume.data_version: the first update has this base version
+  SnapshotInfo current_snapshot     = 3;   // what a new consumer would receive now (informational)
 }
 
 message SnapshotInfo {

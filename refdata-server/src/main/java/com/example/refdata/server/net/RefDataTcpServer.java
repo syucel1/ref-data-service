@@ -5,6 +5,7 @@ import com.example.refdata.protocol.v1.Envelope;
 import com.example.refdata.server.ServerConfig;
 import com.example.refdata.server.health.ServerMetrics;
 import com.example.refdata.server.snapshot.Snapshot;
+import com.google.protobuf.ByteString;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
@@ -22,6 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -35,13 +37,18 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
     private static final Logger log = LoggerFactory.getLogger(RefDataTcpServer.class);
     /** Hint sent with GoAway and connection-limit rejections. */
     private static final int RECONNECT_AFTER_MS = 2_000;
-    /** Published updates kept for live sessions that are still catching up; one further behind must reload. */
+    /** Published updates kept for live sessions that are still catching up or resuming; one further behind must reload. */
     static final int LIVE_UPDATE_HISTORY = 32;
 
     private final ServerConfig config;
     private volatile Snapshot snapshot;
     /** The last {@link #LIVE_UPDATE_HISTORY} updates, oldest first; replaced (never mutated) on each publication. */
     private volatile List<SessionHandler.LiveUpdate> liveUpdates = List.of();
+    /**
+     * Identifies this instance's update history: data versions are only comparable, and the history only replayable,
+     * within one generation. Random per process, so a restart (empty history, possibly reloaded data) never matches.
+     */
+    private final ByteString generation;
     private final ServerMetrics metrics;
     private final String serverId;
     private final String serverVersion;
@@ -62,6 +69,9 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
         this.serverVersion = serverVersion;
         this.admission = new AdmissionController(config.maxConcurrentSnapshots, config.snapshotQueueSize);
         this.limiter = new ConnectionLimiter(config.maxConnections, RECONNECT_AFTER_MS, metrics);
+        byte[] id = new byte[16];
+        new SecureRandom().nextBytes(id);
+        this.generation = ByteString.copyFrom(id);
     }
 
     /** Binds {@code rds.tcp.bind.address:rds.tcp.port} (port 0 = any free port) and starts accepting. */
@@ -126,6 +136,17 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
         return all.subList(from, all.size());
     }
 
+    /**
+     * True when a live consumer holding the data at {@code version} (of this generation) can continue without a
+     * snapshot: it is at the latest published version, or a retained update starts exactly there.
+     */
+    @Override public boolean canResumeFrom(long version) {
+        if (version == snapshot.dataVersion()) return true;
+        for (SessionHandler.LiveUpdate u : liveUpdates) if (u.baseVersion() == version) return true;
+        return false;
+    }
+
+    @Override public ByteString updateGeneration() { return generation; }
     @Override public boolean liveUpdatesEnabled() { return true; }
     public AdmissionController admission() { return admission; }
 
