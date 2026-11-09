@@ -144,7 +144,7 @@ Suggested commits:
 
 ### 10. Bound delivery and handle slow consumers
 
-- [ ] Complete
+- [x] Complete
 
 Limit queue sizes, retained history, batch sizes and processing time. Disconnect and resynchronise lagging consumers without delaying other consumers or publication.
 

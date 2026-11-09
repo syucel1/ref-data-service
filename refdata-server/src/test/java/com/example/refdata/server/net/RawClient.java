@@ -16,7 +16,14 @@ final class RawClient implements AutoCloseable {
     private final DataOutputStream out;
 
     RawClient(int port, int readTimeoutMs) throws IOException {
-        socket = new Socket("127.0.0.1", port);
+        this(port, readTimeoutMs, 0);
+    }
+
+    /** @param receiveBuffer SO_RCVBUF to set before connecting (small = a stalled reader blocks the server sooner); 0 = default */
+    RawClient(int port, int readTimeoutMs, int receiveBuffer) throws IOException {
+        socket = new Socket();
+        if (receiveBuffer > 0) socket.setReceiveBufferSize(receiveBuffer);
+        socket.connect(new java.net.InetSocketAddress("127.0.0.1", port));
         socket.setSoTimeout(readTimeoutMs);
         socket.setTcpNoDelay(true);
         in = new DataInputStream(socket.getInputStream());

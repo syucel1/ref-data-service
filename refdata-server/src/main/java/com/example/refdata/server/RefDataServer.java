@@ -184,6 +184,8 @@ public final class RefDataServer implements AutoCloseable {
     public Snapshot snapshot() { return snapshot; }
     public StartupReport startupReport() { return report; }
     public ServerMetrics metrics() { return metrics; }
+    /** The live-update history currently retained for resuming consumers, oldest first. */
+    public java.util.List<com.example.refdata.server.net.SessionHandler.LiveUpdate> liveHistory() { return tcp.liveHistory(); }
     public ServerConfig config() { return config; }
 
     /** Planned shutdown: readiness DOWN, GoAway to every session, drain, close both ports. Idempotent. */

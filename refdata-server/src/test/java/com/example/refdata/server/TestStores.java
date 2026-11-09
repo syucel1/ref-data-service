@@ -28,8 +28,17 @@ public final class TestStores {
         return build(clients, clients, clients, clients).store();
     }
 
+    /** {@link #small()} at the given data version (for publishing a sequence of versions). */
+    public static RefDataStore small(long dataVersion) {
+        return build(3, 3, 3, 3, dataVersion).store();
+    }
+
     public static RefDataStoreBuilder.Result build(int clients, int addresses, int accounts, int ssis) {
-        RefDataStoreBuilder b = new RefDataStoreBuilder().dataVersion(42);
+        return build(clients, addresses, accounts, ssis, 42);
+    }
+
+    private static RefDataStoreBuilder.Result build(int clients, int addresses, int accounts, int ssis, long dataVersion) {
+        RefDataStoreBuilder b = new RefDataStoreBuilder().dataVersion(dataVersion);
         b.country(new Country("GB", "GBR", 826, "United Kingdom", "Europe"));
         b.country(new Country("US", "USA", 840, "United States", null));
         b.country(new Country("DE", "DEU", 276, "Germany", "Europe"));

@@ -78,6 +78,12 @@ public final class ServerConfig {
     public final Duration snapshotMaxDuration;
     public final Duration heartbeatInterval;
     public final Duration shutdownDrainTimeout;
+    /** Live updates retained for catching-up and resuming sessions: at most this many batches... */
+    public final int liveHistoryBatches;
+    /** ...and at most this many encoded bytes (the newest batch is always kept). */
+    public final int liveHistoryBytes;
+    /** How long a live session may have updates due that it cannot accept before it is disconnected (SLOW_CONSUMER). */
+    public final Duration liveMaxLag;
 
     private ServerConfig(Properties props) {
         this.props = props;
@@ -123,6 +129,9 @@ public final class ServerConfig {
         snapshotMaxDuration = duration("snapshot.max.duration", Duration.ofMinutes(10));
         heartbeatInterval = duration("heartbeat.interval", Duration.ofSeconds(5));
         shutdownDrainTimeout = duration("shutdown.drain.timeout", Duration.ofSeconds(30));
+        liveHistoryBatches = intValue("live.history.batches", 32);
+        liveHistoryBytes = (int) size("live.history.bytes", 16 << 20);
+        liveMaxLag = duration("live.max.lag", Duration.ofSeconds(30));
     }
 
     /** Defaults, overlaid with the {@code rds.*} system properties. */
@@ -202,6 +211,9 @@ public final class ServerConfig {
         if (heartbeatInterval.multipliedBy(Framing.HEARTBEAT_MISSES).compareTo(snapshotQueueMaxWait) > 0) {
             throw new ConfigException(PREFIX + "heartbeat.interval x " + Framing.HEARTBEAT_MISSES + " must not exceed " + PREFIX + "snapshot.queue.max.wait");
         }
+        positive("live.history.batches", liveHistoryBatches);
+        if (liveHistoryBytes < frameMaxBytes) throw new ConfigException(PREFIX + "live.history.bytes must be >= " + PREFIX + "frame.max.bytes (" + frameMaxBytes + ")");
+        positiveDuration("live.max.lag", liveMaxLag);
     }
 
     /** Every effective setting, sorted by key, with the password masked. */
@@ -243,6 +255,9 @@ public final class ServerConfig {
         all.put(PREFIX + "snapshot.max.duration", snapshotMaxDuration.toMillis() + "ms");
         all.put(PREFIX + "heartbeat.interval", heartbeatInterval.toMillis() + "ms");
         all.put(PREFIX + "shutdown.drain.timeout", shutdownDrainTimeout.toMillis() + "ms");
+        all.put(PREFIX + "live.history.batches", String.valueOf(liveHistoryBatches));
+        all.put(PREFIX + "live.history.bytes", String.valueOf(liveHistoryBytes));
+        all.put(PREFIX + "live.max.lag", liveMaxLag.toMillis() + "ms");
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> e : all.entrySet()) sb.append(e.getKey()).append('=').append(e.getValue()).append('\n');
         return sb.toString();

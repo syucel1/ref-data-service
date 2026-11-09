@@ -37,13 +37,18 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
     private static final Logger log = LoggerFactory.getLogger(RefDataTcpServer.class);
     /** Hint sent with GoAway and connection-limit rejections. */
     private static final int RECONNECT_AFTER_MS = 2_000;
-    /** Published updates kept for live sessions that are still catching up or resuming; one further behind must reload. */
-    static final int LIVE_UPDATE_HISTORY = 32;
 
     private final ServerConfig config;
     private volatile Snapshot snapshot;
-    /** The last {@link #LIVE_UPDATE_HISTORY} updates, oldest first; replaced (never mutated) on each publication. */
+    /**
+     * The retained updates, oldest first: at most {@code rds.live.history.batches} of them and
+     * {@code rds.live.history.bytes} in total (the newest is always kept). Shared by every live session, so memory does
+     * not grow with the number of consumers; a session further behind than this must reload a snapshot.
+     * Replaced (never mutated) on each publication.
+     */
     private volatile List<SessionHandler.LiveUpdate> liveUpdates = List.of();
+    /** Encoded bytes of {@link #liveUpdates}; guarded by {@code this}. */
+    private long liveUpdateBytes;
     /**
      * Identifies this instance's update history: data versions are only comparable, and the history only replayable,
      * within one generation. Random per process, so a restart (empty history, possibly reloaded data) never matches.
@@ -119,9 +124,15 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
      */
     public synchronized void publishUpdate(Snapshot next, Envelope update) {
         List<SessionHandler.LiveUpdate> retained = new ArrayList<>(liveUpdates);
-        retained.add(new SessionHandler.LiveUpdate(next.dataVersion() - 1, next.dataVersion(), update));
-        if (retained.size() > LIVE_UPDATE_HISTORY) retained.remove(0);
-        liveUpdates = List.copyOf(retained);
+        SessionHandler.LiveUpdate added = new SessionHandler.LiveUpdate(next.dataVersion() - 1, next.dataVersion(), update);
+        retained.add(added);
+        liveUpdateBytes += added.bytes();
+        int drop = 0;
+        while (retained.size() - drop > 1 && (retained.size() - drop > config.liveHistoryBatches || liveUpdateBytes > config.liveHistoryBytes)) {
+            liveUpdateBytes -= retained.get(drop++).bytes();
+        }
+        liveUpdates = List.copyOf(retained.subList(drop, retained.size()));
+        metrics.liveHistory(liveUpdates.size(), liveUpdateBytes);
         snapshot = next;
         for (Channel ch : sessions) {
             SessionHandler s = ch.pipeline().get(SessionHandler.class);
@@ -145,6 +156,9 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
         for (SessionHandler.LiveUpdate u : liveUpdates) if (u.baseVersion() == version) return true;
         return false;
     }
+
+    /** The retained update history (oldest first), for tests and diagnostics. */
+    public List<SessionHandler.LiveUpdate> liveHistory() { return liveUpdates; }
 
     @Override public ByteString updateGeneration() { return generation; }
     @Override public boolean liveUpdatesEnabled() { return true; }
