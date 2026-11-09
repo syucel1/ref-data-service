@@ -87,10 +87,40 @@ the store data/update version advances with each applied batch.
 
 - A batch contains at most 1,000 mutations and 512 KiB of encoded payload, and must fit the
   configured TCP frame limit. The admin executor has one worker and a 16-request queue.
-- A shared immutable journal retains 32 batches (at most about 16 MiB of payload).
-  Each publication is pushed to live sessions at once (with a 50 ms re-check as a fallback) after
-  snapshot completion; no unbounded per-client queue.
-- Slow consumers are disconnected or forced to reload when the retained history is insufficient.
+- A shared immutable journal retains the newest `rds.live.history.batches` (default 32) batches and at most
+  `rds.live.history.bytes` (default 16 MiB, at least `rds.frame.max.bytes`) of encoded updates; the newest
+  batch is always kept. It is shared by all sessions, so memory does not grow with the number of consumers.
+  Each publication is pushed to live sessions at once (with a 50 ms re-check as a fallback) after snapshot
+  completion; there is no per-client queue.
+
+## Slow consumers and resource bounds
+
+Per live session, the server writes updates only while the connection is below its write-buffer high-water mark
+(`rds.write.buffer.high.water`); everything not yet written stays in the shared journal. A consumer that stops
+reading therefore costs at most one write buffer, and publication never waits for it.
+
+- **Brief lag is tolerated.** When updates are due but the connection is not writable, the session starts a lag
+  clock; delivery continues as soon as the connection drains (write-buffer low-water mark), and the clock resets
+  once the session has caught up.
+- **Sustained lag is cut off.** A session that has had updates due without accepting them for `rds.live.max.lag`
+  (default 30 s) is closed with fatal `SLOW_CONSUMER`. The client reconnects and resumes from its last applied
+  version when the journal still covers it.
+- **Falling behind the journal forces a reload.** If the next update a session needs has left the journal, it is
+  closed with fatal `SNAPSHOT_NOT_AVAILABLE`, whether or not it is currently reading; the client's resume is
+  refused and it loads a fresh snapshot. The last valid store stays readable throughout.
+- **Shutdown** sends GoAway to live sessions at once; the drain phase waits only for running snapshot transfers,
+  never for a lagging live consumer.
+- Snapshot transfers keep their own bounds: `rds.stall.timeout` (no write progress) and `rds.snapshot.max.duration`.
+
+Metrics on `/metrics`: `rds_live_sessions_active`, `rds_live_sessions_lagging`, `rds_live_history_batches`,
+`rds_live_history_bytes`, `rds_live_updates_sent_total` and `rds_live_resyncs_total{reason="slow_consumer"|"history_expired"}`.
+
+Sizing: the journal should cover the longest disconnection you want consumers to survive without a reload
+(publication rate x outage); `rds.live.max.lag` should exceed the longest pause a healthy consumer may take
+(for example a GC pause), and stay well below the time the journal covers.
+
+Batch bounds are unchanged: at most 1,000 mutations and 512 KiB per batch; the admin executor has one worker
+and a 16-request queue.
 - The outbox is drained every 100 ms and immediately after admin commits; old applied
   entries are pruned. Committed rows and release versions survive process restart.
 - This version uses dataVersion as the monotonic transaction version. Each transaction
@@ -107,6 +137,9 @@ the store data/update version advances with each applied batch.
 
 LiveUpdatesIT covers database persistence and restart, two simultaneous consumers,
 all-entity CRUD, rollback, an update committed during an active TCP snapshot transfer, and
-resume with replay of updates committed while a consumer was disconnected.
+resume with replay of updates committed while a consumer was disconnected, and a consumer away longer
+than the retained history reloading a snapshot. `SessionHandlerLiveDeliveryTest`, `LiveHistoryTest` and
+`SlowLiveConsumerTest` (refdata-server) cover lag tolerance, `SLOW_CONSUMER` disconnection, journal bounds,
+a stalled consumer next to a healthy one under a burst of ~19 MB of updates, and shutdown with a stalled consumer.
 Run gradle test integrationTest. On Windows, generate protocol sources with the bundled
 Linux protoc under WSL first, then skip :refdata-contract:generateProto for the Gradle run.

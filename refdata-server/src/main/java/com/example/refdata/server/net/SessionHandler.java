@@ -84,7 +84,10 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     }
 
     /** One published transaction as sent to live sessions: moves the data from {@code baseVersion} to {@code version}. */
-    public record LiveUpdate(long baseVersion, long version, Envelope envelope) {}
+    public record LiveUpdate(long baseVersion, long version, Envelope envelope) {
+        /** Encoded frame size (length prefix included): what this update costs in the history and on the wire. */
+        public int bytes() { return Framing.LENGTH_PREFIX_BYTES + envelope.getSerializedSize(); }
+    }
 
     /** How often a live session re-checks for updates it could not send yet (updates are also pushed on publish). */
     private static final long LIVE_UPDATE_POLL_MS = 50;
@@ -112,6 +115,11 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     private boolean liveUpdates, snapshotFlushed;
     private long deliveredVersion;
     private ScheduledFuture<?> liveUpdateTimer;
+    /** Delivery started (counted in the live-session gauge); since when updates have been due but not accepted (0 = caught up). */
+    private boolean liveDelivering;
+    private long lagSinceNanos;
+    /** Guards {@link #deliverLiveUpdates} against re-entry from a writability event fired while it writes. */
+    private boolean inLiveDelivery;
     private long bytesSent;
     private long bytesAcknowledged;
     private long bytesAtLastStallCheck;
@@ -174,6 +182,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         if (outcome.equals("open")) outcome = last == State.STREAMING ? "disconnect-mid-stream" : "closed-by-client";
         state = State.CLOSED;
         cancelTimers();
+        endLiveDelivery();
         metrics.sessionClosed(clientName, outcome);
         long ms = (System.nanoTime() - openedNanos) / 1_000_000;
         sessionLog.info("session {} closed: client={} instance={} library={} protocol={}.{} schema={} codec={} keepAlive={} snapshot={} bytes={} durationMs={} outcome={} lastState={} remote={}",
@@ -183,7 +192,10 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     }
 
     @Override public void channelWritabilityChanged(ChannelHandlerContext ctx) {
-        if (state == State.STREAMING && ctx.channel().isWritable()) pump();
+        if (ctx.channel().isWritable()) {
+            if (state == State.STREAMING) pump();
+            else if (liveDelivering) deliverLiveUpdates();          // a lagging consumer drained: continue at once
+        }
         ctx.fireChannelWritabilityChanged();
     }
 
@@ -489,28 +501,70 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     /** Starts sending updates after {@link #deliveredVersion}: once SnapshotEnd or UpdatesResumed is on the wire. */
     private void startLiveDelivery() {
         snapshotFlushed = true;
+        if (!liveDelivering) { liveDelivering = true; metrics.liveSessionStarted(); }
         if (liveUpdateTimer == null) liveUpdateTimer = schedulePeriodic(LIVE_UPDATE_POLL_MS, this::deliverLiveUpdates);
         deliverLiveUpdates();
     }
 
     /**
-     * Sends the updates published since {@link #deliveredVersion}, in order. Runs on the event loop: pushed by the
-     * server on every publication and polled as a fallback. A consumer that cannot keep up (channel not writable when
-     * updates are due) or that fell behind the retained history is closed; it reconnects and resumes, or reloads a
-     * snapshot when the history no longer covers its version.
+     * Sends the updates published since {@link #deliveredVersion}, in order, while the channel is writable. Runs on the
+     * event loop: pushed by the server on every publication, when the channel becomes writable again, and polled as a
+     * fallback. Per-session memory stays bounded: updates are only written while the channel is below its write-buffer
+     * high-water mark, and everything not yet written stays in the shared history.
+     * <ul>
+     *   <li>A consumer that falls behind the retained history is closed with SNAPSHOT_NOT_AVAILABLE (it reloads).</li>
+     *   <li>A consumer that has had updates due without accepting them for {@code rds.live.max.lag} is closed with
+     *       SLOW_CONSUMER (it reconnects and resumes, or reloads when the history no longer covers it).</li>
+     * </ul>
+     * Neither case delays publication or other sessions.
      */
     public void deliverLiveUpdates() {
         if (!ctx.executor().inEventLoop()) { ctx.executor().execute(this::deliverLiveUpdates); return; }
-        if (!liveUpdates || !snapshotFlushed || state != State.READY || goingAway) return;
+        if (!liveUpdates || !snapshotFlushed || state != State.READY || goingAway || inLiveDelivery) return;
+        inLiveDelivery = true;
+        try { deliverDueUpdates(); } finally { inLiveDelivery = false; }
+    }
+
+    private void deliverDueUpdates() {
         List<LiveUpdate> due = host.updatesAfter(deliveredVersion);
-        if (due.isEmpty()) return;
-        if (!ctx.channel().isWritable()) { fail(ErrorCode.ERROR_CODE_SLOW_CONSUMER, "live consumer must resynchronise"); return; }
+        int sent = 0;
         for (LiveUpdate update : due) {
-            if (update.baseVersion() != deliveredVersion) { fail(ErrorCode.ERROR_CODE_SNAPSHOT_NOT_AVAILABLE, "update history expired; reload snapshot"); return; }
-            if (!ctx.channel().isWritable()) return;
+            if (update.baseVersion() != deliveredVersion) {
+                metrics.liveResync("history_expired");
+                fail(ErrorCode.ERROR_CODE_SNAPSHOT_NOT_AVAILABLE, "update history no longer covers data version " + deliveredVersion + "; reload snapshot");
+                return;
+            }
+            if (!ctx.channel().isWritable()) break;
+            deliveredVersion = update.version();                    // before the write, which may fire events
+            sent++;
             send(update.envelope()).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
-            deliveredVersion = update.version();
+            metrics.liveUpdateSent();
+            if (state != State.READY) return;                         // closed by an event during the write
         }
+        if (sent == due.size()) { caughtUp(); return; }
+        long now = System.nanoTime();
+        if (lagSinceNanos == 0) {
+            lagSinceNanos = now;
+            metrics.liveLagStarted();
+            log.debug("session {} (client {}) is lagging: {} update(s) due, channel not writable", sessionId, clientName, due.size() - sent);
+            return;
+        }
+        long lagMs = (now - lagSinceNanos) / 1_000_000;
+        if (lagMs >= config.liveMaxLag.toMillis()) {
+            metrics.liveResync("slow_consumer");
+            fail(ErrorCode.ERROR_CODE_SLOW_CONSUMER, "live consumer " + (due.size() - sent) + " update(s) behind for " + lagMs + " ms (limit "
+                    + config.liveMaxLag.toMillis() + " ms); resynchronise");
+        }
+    }
+
+    private void caughtUp() {
+        if (lagSinceNanos != 0) { lagSinceNanos = 0; metrics.liveLagEnded(); }
+    }
+
+    /** Releases the live-session gauges (idempotent; on close). */
+    private void endLiveDelivery() {
+        caughtUp();
+        if (liveDelivering) { liveDelivering = false; metrics.liveSessionEnded(); }
     }
 
     private void stallCheck() {
@@ -594,6 +648,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
                 .setSupportedProtocolMin(Framing.PROTOCOL_MAJOR).setSupportedProtocolMax(Framing.PROTOCOL_MAJOR).addSupportedSchemaMajors(Framing.SCHEMA_MAJOR);
         State previous = state;
         state = State.CLOSED;
+        endLiveDelivery();
         if (previous == State.QUEUED) { if (admission.cancel(this)) metrics.dequeued(); }   // else admitted() will release the slot
         else if (previous == State.STREAMING) { admission.release(); metrics.transferFailed(outcome); }
         ChannelFuture f = ctx.writeAndFlush(Envelope.newBuilder().setError(err).build());

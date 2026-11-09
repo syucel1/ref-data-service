@@ -49,6 +49,9 @@ public class ServerConfigTest {
         assertEquals(Duration.ofMinutes(10), c.snapshotMaxDuration);
         assertEquals(Duration.ofSeconds(5), c.heartbeatInterval);
         assertEquals(Duration.ofSeconds(30), c.shutdownDrainTimeout);
+        assertEquals(32, c.liveHistoryBatches);
+        assertEquals(16 << 20, c.liveHistoryBytes);
+        assertEquals(Duration.ofSeconds(30), c.liveMaxLag);
         for (EntityKind k : EntityKind.values()) assertEquals(1L, (long) c.tableMinRows.get(k));
     }
 
@@ -94,6 +97,9 @@ public class ServerConfigTest {
         expectBad("rds.max.connections", "0", "rds.max.connections");
         expectBad("rds.tcp.port", "70000", "rds.tcp.port");
         expectBad("rds.http.port", "7400", "rds.http.port");
+        expectBad("rds.live.history.batches", "0", "rds.live.history.batches");
+        expectBad("rds.live.history.bytes", "512k", "rds.live.history.bytes");   // below the 1 MiB frame limit
+        expectBad("rds.live.max.lag", "0", "rds.live.max.lag");
     }
 
     @Test public void missingFileIsAClearError() {

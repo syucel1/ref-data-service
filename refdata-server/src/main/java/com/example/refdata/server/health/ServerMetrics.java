@@ -32,6 +32,11 @@ public final class ServerMetrics {
     static final int MAX_CLIENT_NAMES = 1_000;
     static final String OTHER_CLIENT = "other";
     private final ConcurrentMap<String, LongAdder> sessionsByOutcome = new ConcurrentHashMap<>();
+    private final LongAdder liveSessionsActive = new LongAdder();
+    private final LongAdder liveSessionsLagging = new LongAdder();
+    private final LongAdder liveUpdatesSent = new LongAdder();
+    private final ConcurrentMap<String, LongAdder> liveResyncsByReason = new ConcurrentHashMap<>();
+    private volatile long liveHistoryBatches, liveHistoryBytes;
 
     public void sessionOpened() { sessionsActive.increment(); sessionsTotal.increment(); }
     public void sessionClosed(String clientName, String outcome) {
@@ -53,6 +58,16 @@ public final class ServerMetrics {
     public void controlBytesSent(long bytes) { bytesSent.add(bytes); }
     public void integrityReport(boolean confirmed) { integrityReports.increment(); if (confirmed) integrityFailuresConfirmed.increment(); }
     public void sessionError() { sessionErrors.increment(); }
+    /** A live subscription started delivering updates / ended. */
+    public void liveSessionStarted() { liveSessionsActive.increment(); }
+    public void liveSessionEnded() { liveSessionsActive.decrement(); }
+    /** A live session has updates due that it cannot accept yet / caught up again (or closed while lagging). */
+    public void liveLagStarted() { liveSessionsLagging.increment(); }
+    public void liveLagEnded() { liveSessionsLagging.decrement(); }
+    public void liveUpdateSent() { liveUpdatesSent.increment(); }
+    /** A live session was closed so the consumer resynchronises: {@code slow_consumer} or {@code history_expired}. */
+    public void liveResync(String reason) { count(liveResyncsByReason, reason); }
+    public void liveHistory(int batches, long bytes) { liveHistoryBatches = batches; liveHistoryBytes = bytes; }
 
     public long sessionsActive() { return sessionsActive.sum(); }
     public long sessionsQueued() { return sessionsQueued.sum(); }
@@ -65,6 +80,10 @@ public final class ServerMetrics {
     public long connectionsRejected() { return connectionsRejected.sum(); }
     public long transfersFailed(String reason) { LongAdder a = transfersFailedByReason.get(reason); return a == null ? 0 : a.sum(); }
     public long sessions(String clientName) { LongAdder a = sessionsByClient.get(clientName); return a == null ? 0 : a.sum(); }
+    public long liveSessionsActive() { return liveSessionsActive.sum(); }
+    public long liveSessionsLagging() { return liveSessionsLagging.sum(); }
+    public long liveUpdatesSent() { return liveUpdatesSent.sum(); }
+    public long liveResyncs(String reason) { LongAdder a = liveResyncsByReason.get(reason); return a == null ? 0 : a.sum(); }
 
     /** Prometheus text exposition (gauges and counters, one sample per line). */
     public String render() {
@@ -72,6 +91,10 @@ public final class ServerMetrics {
         gauge(sb, "rds_sessions_active", sessionsActive.sum());
         gauge(sb, "rds_sessions_queued", sessionsQueued.sum());
         gauge(sb, "rds_transfers_active", transfersActive.sum());
+        gauge(sb, "rds_live_sessions_active", liveSessionsActive.sum());
+        gauge(sb, "rds_live_sessions_lagging", liveSessionsLagging.sum());
+        gauge(sb, "rds_live_history_batches", liveHistoryBatches);
+        gauge(sb, "rds_live_history_bytes", liveHistoryBytes);
         counter(sb, "rds_sessions_total", sessionsTotal.sum());
         counter(sb, "rds_connections_rejected_total", connectionsRejected.sum());
         counter(sb, "rds_transfers_started_total", transfersStarted.sum());
@@ -87,6 +110,8 @@ public final class ServerMetrics {
         labelled(sb, "rds_transfers_failed_total", "reason", transfersFailedByReason);
         labelled(sb, "rds_sessions_by_client_total", "client", sessionsByClient);
         labelled(sb, "rds_sessions_by_outcome_total", "outcome", sessionsByOutcome);
+        counter(sb, "rds_live_updates_sent_total", liveUpdatesSent.sum());
+        labelled(sb, "rds_live_resyncs_total", "reason", liveResyncsByReason);
         return sb.toString();
     }
 

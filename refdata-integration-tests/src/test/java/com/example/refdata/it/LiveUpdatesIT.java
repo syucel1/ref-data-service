@@ -137,6 +137,23 @@ public class LiveUpdatesIT {
   }
  }
 
+ @Test public void consumerAwayLongerThanTheRetainedHistoryReloadsASnapshot() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN,"rds.live.history.batches","2");
+      var proxy=new TcpProxy("127.0.0.1",server.tcpPort());
+      var client=ItSupport.client(proxy.endpoint()).liveUpdates(true).build()) {
+   long version=client.load().store().dataVersion();long transfers=server.metrics().transfersCompleted();
+   proxy.refuse(true);proxy.cutConnections();
+   for(int i=1;i<=4;i++){var batch=update(server.currentStore(),"Long away "+i);post(server,batch);version=batch.version();}
+   assertEquals("only the newest two batches are retained",2,server.liveHistory().size());
+   proxy.refuse(false);
+   awaitVersion(client,version);
+   assertEquals("Long away 4",client.currentStore().country("GB").name());
+   ItSupport.assertSameStore(ItSupport.referenceStore(db),client.currentStore());
+   assertEquals("resynchronised with one full snapshot",transfers+1,server.metrics().transfersCompleted());
+   var after=update(server.currentStore(),"After reload");post(server,after);awaitVersion(client,after.version());
+  }
+ }
+
  private static void send(DataOutputStream out,Envelope e)throws Exception{byte[] bytes=e.toByteArray();out.writeInt(bytes.length);out.write(bytes);out.flush();}
  private static Envelope read(DataInputStream in)throws Exception{int size=in.readInt();if(size<1||size>1048576)throw new IOException("bad frame");return Envelope.parseFrom(in.readNBytes(size));}
 }
