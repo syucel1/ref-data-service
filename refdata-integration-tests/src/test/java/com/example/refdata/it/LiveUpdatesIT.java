@@ -154,6 +154,69 @@ public class LiveUpdatesIT {
   }
  }
 
+ // ---------------------------------------------------------------- milestone 11: explicit full reload
+
+ private static HttpResponse<String> reload(RefDataServer server,String token) throws Exception {
+  var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+server.adminPort()+"/reload"))
+   .header("Authorization","Bearer "+token).timeout(Duration.ofSeconds(30)).POST(HttpRequest.BodyPublishers.noBody()).build();
+  try(var http=HttpClient.newHttpClient()){return http.send(request,HttpResponse.BodyHandlers.ofString());}
+ }
+ private static void sql(com.example.refdata.db.EmbeddedDerby db,String statement) throws Exception {
+  try(var c=db.connect();var s=c.createStatement()){s.executeUpdate(statement);if(!c.getAutoCommit())c.commit();}
+ }
+ private static void awaitCountryName(RefDataClient client,String name) throws Exception {
+  long end=System.nanoTime()+Duration.ofSeconds(15).toNanos();
+  while(!name.equals(client.currentStore().country("GB").name()) && System.nanoTime()<end)Thread.sleep(10);
+  assertEquals(name,client.currentStore().country("GB").name());
+ }
+
+ @Test public void directSqlFixIsPublishedByAReloadAndLiveConsumersResynchronise() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN);
+      var client=ItSupport.client(ItSupport.endpoint(server)).liveUpdates(true).build()) {
+   long version=client.load().store().dataVersion();long transfers=server.metrics().transfersCompleted();
+   var committed=update(server.currentStore(),"Via admin");post(server,committed);awaitVersion(client,committed.version());
+   sql(db,"UPDATE COUNTRY SET name = 'Fixed by SQL' WHERE country_code = 'GB'");   // bypasses the admin API: not seen yet
+   Thread.sleep(300);
+   assertEquals("Via admin",client.currentStore().country("GB").name());
+   assertEquals(401,reload(server,"wrong-token-wrong-token").statusCode());
+
+   var response=reload(server,TOKEN);
+   assertEquals(response.body(),200,response.statusCode());
+   assertTrue(response.body(),response.body().contains("\"dataVersion\":"+committed.version()));
+   assertEquals("Fixed by SQL",server.currentStore().country("GB").name());
+   awaitCountryName(client,"Fixed by SQL");
+   ItSupport.assertSameStore(ItSupport.referenceStore(db),client.currentStore());
+   assertEquals(1,server.metrics().liveResyncs("reload"));
+   assertTrue("resynchronised with a full snapshot",server.metrics().transfersCompleted()>transfers);
+
+   // admin batches continue from the reloaded version, on the new generation
+   var after=update(server.currentStore(),"After reload");post(server,after);
+   assertEquals(committed.version()+1,after.version());
+   awaitVersion(client,after.version());assertEquals("After reload",client.currentStore().country("GB").name());
+   ItSupport.assertSameStore(ItSupport.referenceStore(db),client.currentStore());
+   assertTrue(version<after.version());
+  }
+ }
+
+ @Test public void reloadOfADatabaseBehindTheServedVersionIsRefused() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN)) {
+   var batch=update(server.currentStore(),"Committed");post(server,batch);
+   sql(db,"DELETE FROM REFDATA_RELEASE WHERE release_id = "+batch.version());
+   var served=server.currentStore();
+   assertEquals(409,reload(server,TOKEN).statusCode());
+   assertSame(served,server.currentStore());
+  }
+ }
+
+ @Test public void reloadOfInvalidDatabaseContentIsRejectedAndThePreviousDataStaysServed() throws Exception {
+  try(var db=ItSupport.tinyDb();var server=ItSupport.startServer(db,"rds.db.url",db.url(),"rds.admin.port","0","rds.admin.token",TOKEN)) {
+   try(var c=db.connect()){new com.example.refdata.db.BadDataInjector(c).duplicateAccountNumber();if(!c.getAutoCommit())c.commit();}
+   var served=server.currentStore();
+   assertEquals(422,reload(server,TOKEN).statusCode());
+   assertSame(served,server.currentStore());
+  }
+ }
+
  private static void send(DataOutputStream out,Envelope e)throws Exception{byte[] bytes=e.toByteArray();out.writeInt(bytes.length);out.write(bytes);out.flush();}
  private static Envelope read(DataInputStream in)throws Exception{int size=in.readInt();if(size<1||size>1048576)throw new IOException("bad frame");return Envelope.parseFrom(in.readNBytes(size));}
 }

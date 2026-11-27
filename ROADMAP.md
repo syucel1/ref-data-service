@@ -159,7 +159,7 @@ Make reloads safe, controls accountable and failures observable.
 
 ### 11. Add an explicit full-reload operation
 
-- [ ] Complete
+- [x] Complete
 
 Reload and validate the database after direct SQL fixes, publish a new snapshot generation and propagate it to consumers. Coordinate concurrent updates so changes are neither lost nor applied twice.
 

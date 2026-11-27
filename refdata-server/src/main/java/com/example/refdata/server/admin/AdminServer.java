@@ -31,12 +31,23 @@ import org.slf4j.LoggerFactory;
  *       resulting data breaks a validation rule</li>
  *   <li>503 the database rejected the write (rolled back) or the batch could not be published</li>
  * </ul>
- * One worker handles requests one at a time (a bounded queue of 16 rejects overload).
+ * <p>{@code POST /reload} (same token, empty body) re-reads the whole database after direct SQL fixes and publishes it
+ * as a new snapshot generation: live consumers resynchronise with a full snapshot. Batches committed through
+ * {@code /changes} are held back while it runs, so none is lost or applied twice. Responses:
+ * <ul>
+ *   <li>200 published; the body is {@link ReloadResult#toJson()}</li>
+ *   <li>409 refused: another reload is running, or the database is behind the served data version (nothing changed)</li>
+ *   <li>422 the database content fails validation (the previous data stays served)</li>
+ *   <li>501 the service was started without a database; 503 the database could not be read</li>
+ * </ul>
+ * One worker handles requests one at a time (a bounded queue of 16 rejects overload); a running reload delays
+ * {@code /changes} requests behind it.
  */
 public final class AdminServer implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(AdminServer.class);
     public static final int MIN_TOKEN_LENGTH = 16;
     static final String PATH = "/changes";
+    static final String RELOAD_PATH = "/reload";
     private static final long RELAY_INTERVAL_MS = 100;
     /** Frame bytes around an update_batch body (length prefix, envelope tag and length), with room to spare. */
     private static final int ENVELOPE_OVERHEAD = 32;
@@ -66,6 +77,7 @@ public final class AdminServer implements AutoCloseable {
         http = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 16);
         http.setExecutor(worker);
         http.createContext(PATH, this::handle);
+        http.createContext(RELOAD_PATH, this::handleReload);
         http.start();
         relayTimer.scheduleWithFixedDelay(relay::drainQuietly, 0, RELAY_INTERVAL_MS, TimeUnit.MILLISECONDS);
         log.info("admin change endpoint listening on {}", http.getAddress());
@@ -89,6 +101,53 @@ public final class AdminServer implements AutoCloseable {
             if (payload.length + ENVELOPE_OVERHEAD > maxFrameBytes) throw new IOException("batch of " + payload.length + " bytes exceeds the frame limit " + maxFrameBytes);
             writer.write(batch, payload);
             relay.drain();
+        }
+    }
+
+    /**
+     * Full reload (what {@code POST /reload} does): publishes pending outbox batches first, then loads, validates and
+     * publishes the database while holding back admin commits and the relay. A pending batch that cannot be published
+     * does not stop the reload: its rows are committed, so the reload includes them.
+     * @see ChangePublisher#reload()
+     */
+    public ReloadResult reload() throws IOException {
+        synchronized (relay) {
+            try {
+                relay.drain();
+            } catch (SQLException | IOException | RuntimeException e) {
+                log.warn("reload: pending outbox batches could not be published first ({}); the reload includes them", e.toString());
+            }
+            return publisher.reload();
+        }
+    }
+
+    private void handleReload(HttpExchange ex) throws IOException {
+        try (ex) {
+            if (!authorized(ex)) { ex.sendResponseHeaders(401, -1); return; }
+            if (!ex.getRequestURI().getPath().equals(RELOAD_PATH)) { ex.sendResponseHeaders(404, -1); return; }
+            if (!ex.getRequestMethod().equals("POST")) { ex.getResponseHeaders().set("Allow", "POST"); ex.sendResponseHeaders(405, -1); return; }
+            ex.getRequestBody().readNBytes(1024);
+            int status;
+            try {
+                byte[] body = reload().toJson().getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().set("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, body.length);
+                ex.getResponseBody().write(body);
+                return;
+            } catch (ReloadRejectedException e) {
+                log.warn("reload refused: {}", e.getMessage());
+                status = 409;
+            } catch (ValidationException e) {
+                log.error("reload rejected: the database content fails validation; the previous data stays served:\n{}", e.report());
+                status = 422;
+            } catch (UnsupportedOperationException e) {
+                log.warn("reload not available: {}", e.getMessage());
+                status = 501;
+            } catch (IOException | RuntimeException e) {
+                log.error("reload failed; the previous data stays served", e);
+                status = 503;
+            }
+            ex.sendResponseHeaders(status, -1);
         }
     }
 

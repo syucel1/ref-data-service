@@ -39,7 +39,13 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
     private static final int RECONNECT_AFTER_MS = 2_000;
 
     private final ServerConfig config;
-    private volatile Snapshot snapshot;
+    /**
+     * The snapshot new connections receive and the update generation it belongs to, replaced as one reference so a new
+     * session never pairs a snapshot with another generation's history. Data versions are only comparable, and the
+     * history only replayable, within one generation: it is random per process (a restart never matches) and replaced
+     * by every full reload ({@link #publishReload}).
+     */
+    private volatile Published current;
     /**
      * The retained updates, oldest first: at most {@code rds.live.history.batches} of them and
      * {@code rds.live.history.bytes} in total (the newest is always kept). Shared by every live session, so memory does
@@ -49,11 +55,6 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
     private volatile List<SessionHandler.LiveUpdate> liveUpdates = List.of();
     /** Encoded bytes of {@link #liveUpdates}; guarded by {@code this}. */
     private long liveUpdateBytes;
-    /**
-     * Identifies this instance's update history: data versions are only comparable, and the history only replayable,
-     * within one generation. Random per process, so a restart (empty history, possibly reloaded data) never matches.
-     */
-    private final ByteString generation;
     private final ServerMetrics metrics;
     private final String serverId;
     private final String serverVersion;
@@ -68,15 +69,23 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
 
     public RefDataTcpServer(ServerConfig config, Snapshot snapshot, ServerMetrics metrics, String serverId, String serverVersion) {
         this.config = config;
-        this.snapshot = snapshot;
+        this.current = new Published(snapshot, newGeneration());
         this.metrics = metrics;
         this.serverId = serverId;
         this.serverVersion = serverVersion;
         this.admission = new AdmissionController(config.maxConcurrentSnapshots, config.snapshotQueueSize);
         this.limiter = new ConnectionLimiter(config.maxConnections, RECONNECT_AFTER_MS, metrics);
+    }
+
+    /** A snapshot and the update generation its data versions belong to. */
+    private record Published(Snapshot snapshot, ByteString generation) { }
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private static ByteString newGeneration() {
         byte[] id = new byte[16];
-        new SecureRandom().nextBytes(id);
-        this.generation = ByteString.copyFrom(id);
+        RANDOM.nextBytes(id);
+        return ByteString.copyFrom(id);
     }
 
     /** Binds {@code rds.tcp.bind.address:rds.tcp.port} (port 0 = any free port) and starts accepting. */
@@ -91,11 +100,12 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override protected void initChannel(SocketChannel ch) {
                         sessions.add(ch);
+                        Published p = current;
                         ch.pipeline().addLast("encoder", encoder)
                                 .addLast("limiter", limiter)
                                 .addLast("frameDecoder", new FrameDecoder())
                                 .addLast("envelopeDecoder", new EnvelopeCodec.Decoder())
-                                .addLast("session", new SessionHandler(config, snapshot, admission, RefDataTcpServer.this, metrics, serverId, serverVersion));
+                                .addLast("session", new SessionHandler(config, p.snapshot(), p.generation(), admission, RefDataTcpServer.this, metrics, serverId, serverVersion));
                     }
                 });
         if (config.tcpSendBuffer > 0) b.childOption(ChannelOption.SO_SNDBUF, config.tcpSendBuffer);
@@ -133,7 +143,25 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
         }
         liveUpdates = List.copyOf(retained.subList(drop, retained.size()));
         metrics.liveHistory(liveUpdates.size(), liveUpdateBytes);
-        snapshot = next;
+        current = new Published(next, current.generation());
+        pushToLiveSessions();
+    }
+
+    /**
+     * Publishes a fully reloaded snapshot as a new update generation: the retained history is dropped (its versions
+     * belong to the previous data), new connections get {@code next}, and every live session of the previous
+     * generation is told to resynchronise (closed with SNAPSHOT_NOT_AVAILABLE; the client's resume is refused and it
+     * loads the new snapshot). Transfers already streaming the previous snapshot finish it first.
+     */
+    public synchronized void publishReload(Snapshot next) {
+        liveUpdates = List.of();
+        liveUpdateBytes = 0;
+        metrics.liveHistory(0, 0);
+        current = new Published(next, newGeneration());
+        pushToLiveSessions();
+    }
+
+    private void pushToLiveSessions() {
         for (Channel ch : sessions) {
             SessionHandler s = ch.pipeline().get(SessionHandler.class);
             if (s != null) s.deliverLiveUpdates();
@@ -152,7 +180,7 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
      * snapshot: it is at the latest published version, or a retained update starts exactly there.
      */
     @Override public boolean canResumeFrom(long version) {
-        if (version == snapshot.dataVersion()) return true;
+        if (version == current.snapshot().dataVersion()) return true;
         for (SessionHandler.LiveUpdate u : liveUpdates) if (u.baseVersion() == version) return true;
         return false;
     }
@@ -160,7 +188,7 @@ public final class RefDataTcpServer implements AutoCloseable, SessionHandler.Ses
     /** The retained update history (oldest first), for tests and diagnostics. */
     public List<SessionHandler.LiveUpdate> liveHistory() { return liveUpdates; }
 
-    @Override public ByteString updateGeneration() { return generation; }
+    @Override public ByteString updateGeneration() { return current.generation(); }
     @Override public boolean liveUpdatesEnabled() { return true; }
     public AdmissionController admission() { return admission; }
 

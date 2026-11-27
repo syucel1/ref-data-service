@@ -16,6 +16,7 @@ import java.util.Set;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
 /** Milestone 10: the shared live-update history is bounded by batch count and bytes, and resume follows the bound. */
@@ -68,5 +69,22 @@ public class LiveHistoryTest {
         publish(s, BASE + 2, 120 << 10);
         assertEquals(List.of(BASE + 2), versions(s.liveHistory()));
         assertTrue(s.canResumeFrom(BASE + 1));
+    }
+
+    @Test public void fullReloadStartsANewGenerationWithAnEmptyHistory() {
+        RefDataTcpServer s = server("8", "128k");
+        for (long v = BASE + 1; v <= BASE + 3; v++) publish(s, v, 100);
+        ByteString before = s.updateGeneration();
+        s.publishReload(ENCODER.encode(TestStores.small(BASE + 3), "reloaded", 0));
+        assertNotEquals(before, s.updateGeneration());
+        assertTrue("the previous data's updates are not replayable", s.liveHistory().isEmpty());
+        assertTrue(s.updatesAfter(BASE).isEmpty());
+        assertTrue(s.canResumeFrom(BASE + 3));                    // only meaningful within the new generation
+        assertFalse(s.canResumeFrom(BASE + 2));
+
+        ByteString reloaded = s.updateGeneration();
+        publish(s, BASE + 4, 100);                                 // later batches continue the new generation
+        assertEquals(reloaded, s.updateGeneration());
+        assertEquals(List.of(BASE + 4), versions(s.liveHistory()));
     }
 }

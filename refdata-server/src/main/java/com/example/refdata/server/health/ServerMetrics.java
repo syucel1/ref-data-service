@@ -37,6 +37,8 @@ public final class ServerMetrics {
     private final LongAdder liveUpdatesSent = new LongAdder();
     private final ConcurrentMap<String, LongAdder> liveResyncsByReason = new ConcurrentHashMap<>();
     private volatile long liveHistoryBatches, liveHistoryBytes;
+    private final ConcurrentMap<String, LongAdder> reloadsByOutcome = new ConcurrentHashMap<>();
+    private volatile long lastReloadDurationMs;
 
     public void sessionOpened() { sessionsActive.increment(); sessionsTotal.increment(); }
     public void sessionClosed(String clientName, String outcome) {
@@ -65,9 +67,11 @@ public final class ServerMetrics {
     public void liveLagStarted() { liveSessionsLagging.increment(); }
     public void liveLagEnded() { liveSessionsLagging.decrement(); }
     public void liveUpdateSent() { liveUpdatesSent.increment(); }
-    /** A live session was closed so the consumer resynchronises: {@code slow_consumer} or {@code history_expired}. */
+    /** A live session was closed so the consumer resynchronises: {@code slow_consumer}, {@code history_expired} or {@code reload}. */
     public void liveResync(String reason) { count(liveResyncsByReason, reason); }
     public void liveHistory(int batches, long bytes) { liveHistoryBatches = batches; liveHistoryBytes = bytes; }
+    /** A full reload finished: {@code published}, {@code rejected} (in progress, data behind, invalid) or {@code failed}. */
+    public void reload(String outcome, long durationMs) { count(reloadsByOutcome, outcome); lastReloadDurationMs = durationMs; }
 
     public long sessionsActive() { return sessionsActive.sum(); }
     public long sessionsQueued() { return sessionsQueued.sum(); }
@@ -84,6 +88,7 @@ public final class ServerMetrics {
     public long liveSessionsLagging() { return liveSessionsLagging.sum(); }
     public long liveUpdatesSent() { return liveUpdatesSent.sum(); }
     public long liveResyncs(String reason) { LongAdder a = liveResyncsByReason.get(reason); return a == null ? 0 : a.sum(); }
+    public long reloads(String outcome) { LongAdder a = reloadsByOutcome.get(outcome); return a == null ? 0 : a.sum(); }
 
     /** Prometheus text exposition (gauges and counters, one sample per line). */
     public String render() {
@@ -112,6 +117,8 @@ public final class ServerMetrics {
         labelled(sb, "rds_sessions_by_outcome_total", "outcome", sessionsByOutcome);
         counter(sb, "rds_live_updates_sent_total", liveUpdatesSent.sum());
         labelled(sb, "rds_live_resyncs_total", "reason", liveResyncsByReason);
+        labelled(sb, "rds_reloads_total", "outcome", reloadsByOutcome);
+        gauge(sb, "rds_last_reload_duration_ms", lastReloadDurationMs);
         return sb.toString();
     }
 
