@@ -37,6 +37,45 @@ After an ambiguous response, inspect the current version before retrying. A stal
 version is rejected, so blindly replaying a committed transaction does not apply it twice.
 The endpoint is deliberately not an arbitrary SQL execution API.
 
+## Full reload after direct SQL fixes
+
+Changes made with SQL outside `POST /changes` are not detected. After such maintenance, call:
+
+```
+POST /reload
+Authorization: Bearer <token>
+```
+
+The service re-reads the whole database with the startup rules (connection retries, sanity minimums,
+validation policy, heap check), encodes a replacement snapshot off the reader path, and only then cuts over.
+Readers, inspection and transfers already in progress keep the previous data until the cutover. The cutover
+publishes the new snapshot as a **new update generation**: the retained update journal is dropped, new
+connections get the new snapshot, and every live session of the previous generation is closed with fatal
+`SNAPSHOT_NOT_AVAILABLE`. The client's resume is refused (other generation) and it loads the new snapshot;
+the last valid store stays readable meanwhile. Snapshot-only clients get the new data on their next load.
+
+Coordination: `/changes` commits and the outbox relay are held back for the duration. Pending outbox batches
+are published first when they can be; their rows are committed either way, so the reload includes them. No
+committed batch is lost or applied twice. Admin batches after the reload use the reloaded data version as
+their base.
+
+Data version: the reload serves the database's latest `PUBLISHED` release. Add a release row with the next
+version for a SQL fix when you can, so versions stay meaningful in logs; a fix without one is still published
+(same data version, new snapshot id and generation). A database **behind** the served version is refused,
+because publishing it would make the relay re-apply batches already in the data.
+
+Responses: 200 published, with a JSON body
+`{"previousDataVersion":7,"dataVersion":8,"snapshotId":"…","rows":{"COUNTRY":250,…},"loadMs":…,"totalMs":…}`;
+401 unauthorized; 405 not POST; 409 refused (another reload running, or the database is behind the served
+version); 422 the database content fails validation; 501 the service was started without a database;
+503 the database could not be read. On every non-200 outcome nothing changes and the previous data stays served.
+`RefDataServer.reload()` does the same in-process.
+
+Sizing: until the cutover both the previous and the replacement data are in memory, so the heap must hold two
+copies. Every live consumer reloads a full snapshot after the cutover; the transfer slots and queue
+(`rds.max.concurrent.snapshots`, `rds.snapshot.queue.size`) pace that burst. A long reload delays `/changes`
+requests queued behind it (one admin worker, 16-request queue).
+
 ## Admin Java example
 
 ```java
@@ -113,7 +152,8 @@ reading therefore costs at most one write buffer, and publication never waits fo
 - Snapshot transfers keep their own bounds: `rds.stall.timeout` (no write progress) and `rds.snapshot.max.duration`.
 
 Metrics on `/metrics`: `rds_live_sessions_active`, `rds_live_sessions_lagging`, `rds_live_history_batches`,
-`rds_live_history_bytes`, `rds_live_updates_sent_total` and `rds_live_resyncs_total{reason="slow_consumer"|"history_expired"}`.
+`rds_live_history_bytes`, `rds_live_updates_sent_total`, `rds_live_resyncs_total{reason="slow_consumer"|"history_expired"|"reload"}`,
+`rds_reloads_total{outcome="published"|"rejected"|"failed"}` and `rds_last_reload_duration_ms`.
 
 Sizing: the journal should cover the longest disconnection you want consumers to survive without a reload
 (publication rate x outage); `rds.live.max.lag` should exceed the longest pause a healthy consumer may take
@@ -129,9 +169,8 @@ and a 16-request queue.
   reader path per transaction, and a replacement encoded snapshot is prepared for future
   connections. This favours correctness for reference-data workloads; it is not yet a
   high-frequency persistent-index implementation. Batch related edits to amortise rebuilds.
-- Direct SQL writes outside this API are not automatically detected. Stop the writer and
-  restart/reload the service after such maintenance. A coordinated online full-reload
-  operation and external database CDC remain separate roadmap work.
+- Direct SQL writes outside this API are not automatically detected. Run `POST /reload` after
+  such maintenance (see above). External database CDC remains separate roadmap work.
 
 ## Verification
 
@@ -141,5 +180,9 @@ resume with replay of updates committed while a consumer was disconnected, and a
 than the retained history reloading a snapshot. `SessionHandlerLiveDeliveryTest`, `LiveHistoryTest` and
 `SlowLiveConsumerTest` (refdata-server) cover lag tolerance, `SLOW_CONSUMER` disconnection, journal bounds,
 a stalled consumer next to a healthy one under a burst of ~19 MB of updates, and shutdown with a stalled consumer.
+Full reload: `RefDataServerReloadTest` (cutover, new generation, live session resync, same-version fix, refusal of a
+database behind the served version, invalid content, unreachable database, no database), `LiveHistoryTest` and
+`SessionHandlerLiveResumeTest` (journal reset, sessions of the previous generation), and `LiveUpdatesIT` (direct SQL
+fix published by `POST /reload` to a live consumer, then admin batches on the new generation; 401/409/422).
 Run gradle test integrationTest. On Windows, generate protocol sources with the bundled
 Linux protoc under WSL first, then skip :refdata-contract:generateProto for the Gradle run.

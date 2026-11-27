@@ -17,4 +17,16 @@ public interface ChangePublisher {
 
     /** Builds the store that {@link #publish} would produce, without publishing it (validation only). */
     RefDataStore preview(ChangeBatch batch);
+
+    /**
+     * Loads, validates and publishes the whole database as a new snapshot generation (live consumers resynchronise).
+     * The caller guarantees no batch is published concurrently.
+     * @throws ReloadRejectedException another reload is running, or the database is behind the served version
+     * @throws com.example.refdata.model.validation.ValidationException the database content fails validation
+     * @throws UnsupportedOperationException the service was not started from a database
+     * @throws IOException the database could not be read
+     */
+    default ReloadResult reload() throws IOException {
+        throw new UnsupportedOperationException("full reload is not supported by this publisher");
+    }
 }

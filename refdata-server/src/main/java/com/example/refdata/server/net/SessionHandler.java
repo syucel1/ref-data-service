@@ -97,6 +97,8 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
 
     private final ServerConfig config;
     private final Snapshot snapshot;
+    /** The update generation {@link #snapshot} belongs to; when the host's moves on (a full reload), live delivery stops. */
+    private final ByteString generation;
     private final AdmissionController admission;
     private final SessionHost host;
     private final ServerMetrics metrics;
@@ -139,10 +141,18 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
 
     private ScheduledFuture<?> handshakeTimer, idleTimer, heartbeatTimer, queueTimer, durationTimer, stallTimer;
 
+    /** A session on the host's current update generation. */
     public SessionHandler(ServerConfig config, Snapshot snapshot, AdmissionController admission, SessionHost host, ServerMetrics metrics,
+                          String serverId, String serverVersion) {
+        this(config, snapshot, host.updateGeneration(), admission, host, metrics, serverId, serverVersion);
+    }
+
+    /** @param generation the update generation {@code snapshot} belongs to (read together with it, so they always match) */
+    public SessionHandler(ServerConfig config, Snapshot snapshot, ByteString generation, AdmissionController admission, SessionHost host, ServerMetrics metrics,
                           String serverId, String serverVersion) {
         this.config = config;
         this.snapshot = snapshot;
+        this.generation = generation;
         this.admission = admission;
         this.host = host;
         this.metrics = metrics;
@@ -285,7 +295,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
         HelloAck ack = HelloAck.newBuilder().setProtocolMajor(Framing.PROTOCOL_MAJOR).setProtocolMinor(Framing.PROTOCOL_MINOR)
                 .setSchemaMajor(Framing.SCHEMA_MAJOR).setSchemaMinor(Framing.SCHEMA_MINOR).setCodec(codec)
                 .setMaxFrameBytes(Math.min(config.frameMaxBytes, clientMax)).setHeartbeatIntervalMs((int) config.heartbeatInterval.toMillis())
-                .setLiveUpdates(liveUpdates).setUpdateGeneration(liveUpdates ? host.updateGeneration() : ByteString.EMPTY).setServerId(serverId).setServerVersion(serverVersion).setSessionId(sessionId).setCurrentSnapshot(snapshot.info()).build();
+                .setLiveUpdates(liveUpdates).setUpdateGeneration(liveUpdates ? generation : ByteString.EMPTY).setServerId(serverId).setServerVersion(serverVersion).setSessionId(sessionId).setCurrentSnapshot(snapshot.info()).build();
         send(Envelope.newBuilder().setHelloAck(ack).build());
         enterReady();
         if (keepAlive) heartbeatTimer = schedulePeriodic(config.heartbeatInterval.toMillis(), this::heartbeatIfIdle);
@@ -377,7 +387,7 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     private boolean resumeLive(long id, LiveResume position) {
         long version = position.getDataVersion();
         String refusal = null;
-        if (!position.getGeneration().equals(host.updateGeneration())) refusal = "other update generation (server restarted or another instance)";
+        if (!position.getGeneration().equals(generation) || !generation.equals(host.updateGeneration())) refusal = "other update generation (server restarted, data reloaded, or another instance)";
         else if (!host.canResumeFrom(version)) refusal = "data version " + version + " is outside the retained update history";
         if (refusal != null) {
             log.info("session {} (client {} {}) cannot resume from data version {}: {}; sending a full snapshot", sessionId, clientName, clientInstance, version, refusal);
@@ -512,7 +522,8 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
      * fallback. Per-session memory stays bounded: updates are only written while the channel is below its write-buffer
      * high-water mark, and everything not yet written stays in the shared history.
      * <ul>
-     *   <li>A consumer that falls behind the retained history is closed with SNAPSHOT_NOT_AVAILABLE (it reloads).</li>
+     *   <li>A consumer that falls behind the retained history, or whose data predates a full reload (another update
+     *       generation), is closed with SNAPSHOT_NOT_AVAILABLE (it reloads).</li>
      *   <li>A consumer that has had updates due without accepting them for {@code rds.live.max.lag} is closed with
      *       SLOW_CONSUMER (it reconnects and resumes, or reloads when the history no longer covers it).</li>
      * </ul>
@@ -526,6 +537,11 @@ public final class SessionHandler extends SimpleChannelInboundHandler<Envelope> 
     }
 
     private void deliverDueUpdates() {
+        if (!generation.equals(host.updateGeneration())) {
+            metrics.liveResync("reload");
+            fail(ErrorCode.ERROR_CODE_SNAPSHOT_NOT_AVAILABLE, "the server reloaded its data (new update generation); reload snapshot");
+            return;
+        }
         List<LiveUpdate> due = host.updatesAfter(deliveredVersion);
         int sent = 0;
         for (LiveUpdate update : due) {

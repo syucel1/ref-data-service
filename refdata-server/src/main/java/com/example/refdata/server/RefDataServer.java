@@ -7,11 +7,14 @@ import com.example.refdata.model.RefDataSource;
 import com.example.refdata.model.RefDataStore;
 import com.example.refdata.model.RefDataStoreBuilder;
 import com.example.refdata.model.inspection.InspectionServer;
+import com.example.refdata.model.validation.ValidationException;
 import com.example.refdata.model.validation.ValidationReport;
 import com.example.refdata.protocol.v1.Envelope;
 import com.example.refdata.server.admin.AdminServer;
 import com.example.refdata.server.admin.ChangePublisher;
 import com.example.refdata.server.admin.ConnectionFactory;
+import com.example.refdata.server.admin.ReloadRejectedException;
+import com.example.refdata.server.admin.ReloadResult;
 import com.example.refdata.server.health.HealthServer;
 import com.example.refdata.server.health.ServerMetrics;
 import com.example.refdata.server.health.StartupReport;
@@ -27,6 +30,7 @@ import java.net.InetAddress;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The whole service in one object, for the launcher and for in-process tests: the startup sequence of DESIGN.md 7.1
@@ -54,6 +58,10 @@ public final class RefDataServer implements AutoCloseable {
     private StartupReport report;
     private RefDataTcpServer tcp;
     private boolean closed;
+    /** Where {@link #reload} reads from; null when started from a built store. */
+    private RefDataSource source;
+    /** One reload at a time; held while loading, so it is never the server monitor that readers and publishers need. */
+    private final ReentrantLock reloadLock = new ReentrantLock();
 
     private RefDataServer(ServerConfig config) {
         this.config = config;
@@ -70,6 +78,7 @@ public final class RefDataServer implements AutoCloseable {
      */
     public static RefDataServer start(ServerConfig config, RefDataSource source) throws InterruptedException {
         RefDataServer s = new RefDataServer(config);
+        s.source = source;
         try {
             s.openHealth();
             StoreLoader.Loaded loaded = new StoreLoader(config, s.health::phase).load(source);
@@ -157,6 +166,68 @@ public final class RefDataServer implements AutoCloseable {
         log.info("published data version {} ({} changes), snapshot {}", batch.version(), batch.changes().size(), next.snapshotIdHex());
     }
 
+    /**
+     * Explicit full reload, for direct SQL fixes that bypassed the admin API: re-reads the whole database, validates it
+     * and publishes it as a new snapshot generation. Readers, inspection and running transfers keep the previous data
+     * until the cutover; live consumers are then told to resynchronise and load the new snapshot. With the admin
+     * endpoint enabled, admin commits and the outbox relay are held back for the duration, so no committed batch is
+     * lost or applied twice. The load uses the startup settings (retries, sanity minimums, validation policy, heap
+     * check); the previous data stays in memory until the cutover, so the heap must hold both copies.
+     * @throws ReloadRejectedException another reload is running, or the database is behind the served data version
+     * @throws ValidationException the database content fails validation (nothing is published)
+     * @throws UnsupportedOperationException the server was started from a built store (no database)
+     * @throws IOException the database could not be read (nothing is published)
+     */
+    public ReloadResult reload() throws IOException {
+        AdminServer a = admin;
+        return a != null ? a.reload() : reloadFromSource();
+    }
+
+    private ReloadResult reloadFromSource() throws IOException {
+        if (source == null) throw new UnsupportedOperationException("started from a built store: there is no database to reload from");
+        if (!reloadLock.tryLock()) throw new ReloadRejectedException("a reload is already in progress");
+        long t0 = System.nanoTime();
+        String outcome = "failed";
+        try {
+            synchronized (this) { if (closed) throw new IllegalStateException("server closed"); }
+            long before = published.store().dataVersion();
+            log.info("full reload started (serving data version {}, snapshot {})", before, snapshot.snapshotIdHex());
+            StoreLoader.Loaded loaded;
+            try {
+                loaded = new StoreLoader(config, phase -> log.info("full reload: {}", phase)).load(source);
+            } catch (StoreLoader.StartupException e) {
+                if (e.getCause() instanceof ValidationException invalid) { outcome = "rejected"; throw invalid; }
+                throw new IOException("reload failed: " + e.getMessage(), e);
+            }
+            long loadMs = (System.nanoTime() - t0) / 1_000_000;
+            Snapshot next = encoder.encode(loaded.store(), loaded.preflight().sourceDescription(), System.currentTimeMillis());
+            synchronized (this) {
+                if (closed) throw new IllegalStateException("server closed");
+                long served = published.store().dataVersion();
+                if (loaded.store().dataVersion() < served) {
+                    outcome = "rejected";
+                    throw new ReloadRejectedException("the database is at data version " + loaded.store().dataVersion() + ", behind the served version " + served
+                            + " (were release rows removed?); nothing was published");
+                }
+                tcp.publishReload(next);
+                snapshot = next;
+                published = new InspectionServer.View(loaded.store(), next.snapshotIdHex());
+                health.published(next, report);
+            }
+            outcome = "published";
+            long totalMs = (System.nanoTime() - t0) / 1_000_000;
+            log.info("full reload published data version {} (was {}), snapshot {}, {} rows, load {} ms, total {} ms; live consumers resynchronise",
+                    next.dataVersion(), before, next.snapshotIdHex(), loaded.loadedRows().values().stream().mapToLong(Long::longValue).sum(), loadMs, totalMs);
+            return new ReloadResult(before, next.dataVersion(), next.snapshotIdHex(), loaded.loadedRows(), loadMs, totalMs);
+        } catch (ReloadRejectedException e) {
+            outcome = "rejected";
+            throw e;
+        } finally {
+            metrics.reload(outcome, (System.nanoTime() - t0) / 1_000_000);
+            reloadLock.unlock();
+        }
+    }
+
     /** The store a batch would produce, built with the configured index settings and the FAIL policy. */
     private RefDataStore nextStore(ChangeBatch batch) {
         return batch.apply(published.store(), new RefDataStoreBuilder().denseThreshold(config.indexDenseThreshold));
@@ -167,6 +238,7 @@ public final class RefDataServer implements AutoCloseable {
             @Override public RefDataStore currentStore() { return RefDataServer.this.currentStore(); }
             @Override public void publish(ChangeBatch batch) throws IOException { publishChanges(batch); }
             @Override public RefDataStore preview(ChangeBatch batch) { return nextStore(batch); }
+            @Override public ReloadResult reload() throws IOException { return reloadFromSource(); }
         };
     }
 

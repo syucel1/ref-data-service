@@ -43,6 +43,7 @@ public class SessionHandlerLiveResumeTest {
     private final class LiveHost implements SessionHandler.SessionHost {
         final List<SessionHandler.LiveUpdate> history = new ArrayList<>();
         long latest = V;
+        ByteString generation = GENERATION;
         void publish(long version) {
             history.add(new SessionHandler.LiveUpdate(version - 1, version, update(version)));
             latest = version;
@@ -50,7 +51,7 @@ public class SessionHandlerLiveResumeTest {
         @Override public boolean acceptingTransfers() { return true; }
         @Override public boolean liveUpdatesEnabled() { return true; }
         @Override public void storedFrameCorrupt(int seq, Codec codec) { }
-        @Override public ByteString updateGeneration() { return GENERATION; }
+        @Override public ByteString updateGeneration() { return generation; }
         @Override public boolean canResumeFrom(long version) {
             return version == latest || history.stream().anyMatch(u -> u.baseVersion() == version);
         }
@@ -237,6 +238,45 @@ public class SessionHandlerLiveResumeTest {
         EmbeddedChannel ch = liveSession(noResume);
         ch.writeInbound(resumeRequest(1, ByteString.EMPTY, V));
         fullSnapshot(ch, 1);
+        ch.close();
+    }
+
+    // ------------------------------------------------------------------ milestone 11: full reload
+
+    @Test public void liveSessionOfThePreviousGenerationIsClosedForResynchronisationAfterAReload() {
+        EmbeddedChannel ch = liveSession(host);
+        ch.writeInbound(Envelope.newBuilder().setSnapshotRequest(SnapshotRequest.newBuilder().setRequestId(1)).build());
+        fullSnapshot(ch, 1);
+        host.generation = ByteString.copyFromUtf8("reloaded-0002");   // what RefDataTcpServer.publishReload does
+        host.history.clear();
+        ch.pipeline().get(SessionHandler.class).deliverLiveUpdates();
+        Envelope error = env(ch);
+        assertEquals(ErrorCode.ERROR_CODE_SNAPSHOT_NOT_AVAILABLE, error.getError().getCode());
+        assertTrue(error.getError().getFatal());
+        assertEquals(1, metrics.liveResyncs("reload"));
+        ch.runPendingTasks();
+        assertFalse(ch.isOpen());
+    }
+
+    @Test public void sessionOpenedJustBeforeAReloadAdvertisesItsSnapshotsGenerationAndResynchronisesAfterTheTransfer() {
+        host.generation = ByteString.copyFromUtf8("reloaded-0002");   // the reload landed between accept and Hello
+        EmbeddedChannel ch = new EmbeddedChannel(new SessionHandler(config, SNAPSHOT, GENERATION, admission, host, metrics, "srv", "test"));
+        ch.writeInbound(Envelope.newBuilder().setHello(Hello.newBuilder().setProtocolMajor(1).addSchemaMajors(1).setClientName("live")
+                .setKeepAlive(true).setLiveUpdates(true)).build());
+        assertEquals("the generation of the snapshot it will serve", GENERATION, env(ch).getHelloAck().getUpdateGeneration());
+        ch.writeInbound(Envelope.newBuilder().setSnapshotRequest(SnapshotRequest.newBuilder().setRequestId(1)).build());
+        fullSnapshot(ch, 1);
+        ch.pipeline().get(SessionHandler.class).deliverLiveUpdates();   // the first delivery (the 50 ms poll in a server)
+        Envelope error = env(ch);                                  // never left on stale data waiting for updates
+        assertEquals(ErrorCode.ERROR_CODE_SNAPSHOT_NOT_AVAILABLE, error.getError().getCode());
+    }
+
+    @Test public void resumeWithThePreviousGenerationAfterAReloadServesAFullSnapshot() {
+        host.generation = ByteString.copyFromUtf8("reloaded-0002");
+        EmbeddedChannel ch = liveSession(host);
+        ch.writeInbound(resumeRequest(7, GENERATION, V));
+        fullSnapshot(ch, 7);
+        assertNull(ch.readOutbound());
         ch.close();
     }
 }
